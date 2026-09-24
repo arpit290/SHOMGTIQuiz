@@ -1,45 +1,63 @@
-# The Arena — Phase 1
+# The Arena — Phase 2
 
 A college-event prototype for a single-instance, text-first multiplayer arena game.
 
-## Phase 1 includes
+The project is designed for roughly **200 participants in one shared game** rather than multiple games or a production MMORPG architecture.
 
-- One shared game instance (`main_game`)
-- FastAPI backend
-- React + TypeScript frontend (Vite)
-- Player registration by name
-- Unique player IDs (`P-001`, `P-002`, ...)
+## Stack
+
+- FastAPI + Python backend
+- React + TypeScript + Vite frontend
+- WebSockets for real-time updates
+- In-memory game state for the live event
+
+## Phase 2 includes
+
+- One shared game (`main_game`)
 - 200-player cap
-- Lobby state
-- Admin token login
-- Admin dashboard
-- Real-time player/admin WebSockets
-- Connection status tracking
-- Live event feed
-- Start / pause / resume / reset controls
-- Mobile-friendly UI
+- Player registration and session tokens
+- 12 outer zones + central Cornucopia
+- Zone graph and validated movement
+- Health / Attack / Speed stats
+- Global timed rounds (15 seconds by default)
+- Backend-authoritative deadlines
+- One action per player per round
+- Timeout elimination
+- Late submission elimination
+- MOVE / SEARCH / REST / HIDE / SCOUT / WAIT
+- OPENING / MAIN / FINAL / GAME_OVER phases
+- Admin pause / resume / end-round / reset controls
+- Live admin zone population overview
+- Searchable admin player table
+- Mobile-friendly player game view
+- Reconnection handling
 
-## Not in Phase 1
+## Phase 3 will add
 
-Zones, movement, health/attack/speed mechanics, timers, combat, items, elimination rules, and round resolution are intentionally left for Phase 2.
+Combat, attacks, damage rules, items, inventory, supply drops, and richer random events.
 
 ## Run the backend
 
 ```bash
 cd backend
 python -m venv .venv
-# Windows: .venv\\Scripts\\activate
-# macOS/Linux: source .venv/bin/activate
+
+# Windows
+.venv\\Scripts\\activate
+
+# macOS/Linux
+source .venv/bin/activate
+
 pip install -r requirements.txt
 
-# Optional: set ADMIN_TOKEN before starting.
-# PowerShell: $env:ADMIN_TOKEN="my-secret"
-# macOS/Linux: export ADMIN_TOKEN="my-secret"
+# Optional: configure the event
+# PowerShell:
+# $env:ADMIN_TOKEN="your-strong-admin-token"
+# $env:ROUND_DURATION_SECONDS="15"
+# $env:FINAL_PLAYER_THRESHOLD="20"
 
-uvicorn app:app --reload --host 0.0.0.0 --port 8000
+uvicorn app:app --host 0.0.0.0 --port 8000
 ```
-
-Default admin token is `change-me` if you do not set `ADMIN_TOKEN`.
 
 Run tests:
 
@@ -55,15 +73,50 @@ In another terminal:
 ```bash
 cd frontend
 npm install
-npm run dev
+npm run dev -- --host 0.0.0.0
 ```
 
-Open `http://localhost:5173`.
+For a college LAN, participants should open:
 
-For a college LAN, run both servers on a laptop/server whose LAN IP is reachable by participants, then have participants open `http://YOUR-LAN-IP:5173`. The frontend derives the backend/WebSocket host from the browser hostname, so it does not assume participants are running the backend on their own device.
+```text
+http://YOUR-LAN-IP:5173
+```
 
-## Event notes
+The frontend derives the backend/WebSocket host from the browser hostname unless `VITE_API_BASE` / `VITE_WS_BASE` are explicitly set.
 
-For a real event, use a strong admin token and run the backend on a machine/server reachable by participants on the same network or through your deployment host.
+## Event configuration
 
-Phase 1 stores the active game in memory. This is intentional for the prototype; Phase 2 can add restart-safe persistence if needed.
+Default values:
+
+```text
+MAX_PLAYERS=200
+ROUND_DURATION_SECONDS=15
+FINAL_PLAYER_THRESHOLD=20
+ADMIN_TOKEN=change-me
+```
+
+The active game is intentionally held in memory. This is appropriate for the event prototype, but the game will reset if the backend process restarts. For the actual event, keep the backend process on a stable host and avoid auto-reload.
+
+## Important gameplay rule
+
+The frontend timer is only a display. The FastAPI backend owns the actual round deadline, so changing browser time or disabling the JavaScript timer cannot extend a player's turn.
+
+## Architecture
+
+```text
+React player clients (~200)
+        |
+        | REST + WebSocket
+        v
+     FastAPI
+        |
+        v
+    Game State
+        |
+   Game Engine rules
+   /      |       \\
+movement rounds  actions
+        |
+        v
+ Admin Dashboard
+```

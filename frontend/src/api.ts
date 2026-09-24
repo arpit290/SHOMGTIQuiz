@@ -2,11 +2,17 @@ const API_PORT = 8000
 
 function hostBase() {
   const hostname = window.location.hostname || 'localhost'
-  return `http://${hostname}:${API_PORT}`
+  return `${window.location.protocol}//${hostname}:${API_PORT}`
 }
 
 const API_BASE = import.meta.env.VITE_API_BASE || hostBase()
 const WS_BASE = import.meta.env.VITE_WS_BASE || API_BASE.replace(/^http/, 'ws')
+
+async function parseResponse(response: Response) {
+  const payload = await response.json()
+  if (!response.ok) throw new Error(payload.detail ?? 'Request failed')
+  return payload
+}
 
 export async function joinGame(name: string) {
   const response = await fetch(`${API_BASE}/api/join`, {
@@ -14,13 +20,34 @@ export async function joinGame(name: string) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ name }),
   })
-  const payload = await response.json()
-  if (!response.ok) throw new Error(payload.detail ?? 'Unable to join game')
-  return payload as {
-    player: { id: string; name: string; alive: boolean; connected: boolean }
+  return parseResponse(response) as Promise<{
+    player: {
+      id: string
+      name: string
+      health: number
+      maxHealth: number
+      attack: number
+      speed: number
+      zoneId: string
+      zoneName: string
+      alive: boolean
+      connected: boolean
+    }
     sessionToken: string
-    game: { gameId: string; status: string; playerCount: number; maxPlayers: number }
-  }
+    game: { gameId: string; status: string; phase: string; round: number; playerCount: number; maxPlayers: number }
+  }>
+}
+
+export async function submitAction(token: string, playerId: string, action: string, targetZoneId?: string) {
+  const response = await fetch(`${API_BASE}/api/action`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'X-Player-Token': token,
+    },
+    body: JSON.stringify({ playerId, action, targetZoneId }),
+  })
+  return parseResponse(response)
 }
 
 export async function adminLogin(token: string) {
@@ -29,9 +56,7 @@ export async function adminLogin(token: string) {
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify({ token }),
   })
-  const payload = await response.json()
-  if (!response.ok) throw new Error(payload.detail ?? 'Invalid admin token')
-  return payload
+  return parseResponse(response)
 }
 
 export async function adminAction(token: string, action: string) {
@@ -43,18 +68,14 @@ export async function adminAction(token: string, action: string) {
     },
     body: JSON.stringify({ action }),
   })
-  const payload = await response.json()
-  if (!response.ok) throw new Error(payload.detail ?? 'Admin action failed')
-  return payload
+  return parseResponse(response)
 }
 
 export async function getAdminState(token: string) {
   const response = await fetch(`${API_BASE}/api/admin/state`, {
     headers: { 'X-Admin-Token': token },
   })
-  const payload = await response.json()
-  if (!response.ok) throw new Error(payload.detail ?? 'Unable to load admin state')
-  return payload
+  return parseResponse(response)
 }
 
 export function playerWsUrl(playerId: string, token: string) {
