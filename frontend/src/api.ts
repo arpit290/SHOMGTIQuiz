@@ -32,20 +32,28 @@ export async function joinGame(name: string) {
       zoneName: string
       alive: boolean
       connected: boolean
+      inventory: { id: string; type: string; name: string; description: string }[]
     }
     sessionToken: string
     game: { gameId: string; status: string; phase: string; round: number; playerCount: number; maxPlayers: number }
   }>
 }
 
-export async function submitAction(token: string, playerId: string, action: string, targetZoneId?: string) {
+export async function submitAction(
+  token: string,
+  playerId: string,
+  action: string,
+  targetZoneId?: string,
+  targetPlayerId?: string,
+  itemId?: string,
+) {
   const response = await fetch(`${API_BASE}/api/action`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'X-Player-Token': token,
     },
-    body: JSON.stringify({ playerId, action, targetZoneId }),
+    body: JSON.stringify({ playerId, action, targetZoneId, targetPlayerId, itemId }),
   })
   return parseResponse(response)
 }
@@ -59,14 +67,14 @@ export async function adminLogin(token: string) {
   return parseResponse(response)
 }
 
-export async function adminAction(token: string, action: string) {
+export async function adminAction(token: string, action: string, targetZoneId?: string) {
   const response = await fetch(`${API_BASE}/api/admin/action`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'X-Admin-Token': token,
     },
-    body: JSON.stringify({ action }),
+    body: JSON.stringify({ action, targetZoneId }),
   })
   return parseResponse(response)
 }

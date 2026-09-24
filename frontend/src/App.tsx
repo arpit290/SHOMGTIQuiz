@@ -2,7 +2,7 @@ import { FormEvent, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import { Link, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import { adminAction, adminLogin, adminWsUrl, getAdminState, joinGame, playerWsUrl, submitAction } from './api'
-import type { AdminState, GameEvent, Player, PlayerGameState, Zone } from './types'
+import type { AdminState, GameEvent, InventoryItem, Player, PlayerGameState, VisibleOpponent, Zone } from './types'
 
 const PLAYER_STORAGE_KEY = 'arena_player_session'
 const ADMIN_STORAGE_KEY = 'arena_admin_token'
@@ -26,7 +26,7 @@ function LandingPage() {
     <section className="hero panel">
       <p className="eyebrow">COLLEGE EVENT // ONE SHARED ARENA</p>
       <h1>THE<br />ARENA</h1>
-      <p className="hero-copy">A text-first survival game. Enter your name, join the lobby, and survive the rounds.</p>
+      <p className="hero-copy">A text-first survival game. Enter your name, make your choices, and survive the rounds.</p>
       <div className="button-row">
         <Link className="button button-primary" to="/join">ENTER THE ARENA</Link>
         <Link className="button button-secondary" to="/admin">ADMIN CONTROL</Link>
@@ -72,9 +72,9 @@ function JoinPage() {
   )
 }
 
-function EventFeed({ events }: { events: GameEvent[] }) {
+function EventFeed({ events, compact = false }: { events: GameEvent[]; compact?: boolean }) {
   return (
-    <div className="event-feed">
+    <div className={`event-feed ${compact ? 'compact' : ''}`}>
       <div className="section-heading">LIVE FEED</div>
       {events.length === 0 ? <p className="muted">No events yet.</p> : events.slice().reverse().map((event) => (
         <div key={event.id} className="event-item">
@@ -113,6 +113,7 @@ function usePlayerSocket() {
     const connect = () => {
       if (closedByEffect) return
       ws = new WebSocket(playerWsUrl(session.player.id, session.sessionToken))
+      ws.onopen = () => setError('')
       ws.onmessage = (message) => {
         const payload = JSON.parse(message.data) as { type: string; data: PlayerGameState | GameEvent }
         if (payload.type === 'RESET') {
@@ -168,14 +169,14 @@ function PlayerLobby() {
       </div>
       <div className="waiting-panel">
         <div className="loading-dot" />
-        <div><strong>Waiting for the admin to start the game.</strong><p className="muted">Once the game begins, your zone and first timed round will appear here.</p></div>
+        <div><strong>Waiting for the admin to start the game.</strong><p className="muted">Once the game begins, your zone, inventory, and first timed round will appear here.</p></div>
       </div>
       <EventFeed events={state.events} />
     </section>
   )
 }
 
-function Countdown({ deadline, serverNow, paused = false }: { deadline: string | null; serverNow: string; paused?: boolean }) {
+function Countdown({ deadline, serverNow, durationSeconds, paused = false }: { deadline: string | null; serverNow: string; durationSeconds: number; paused?: boolean }) {
   const offsetMs = useMemo(() => new Date(serverNow).getTime() - Date.now(), [serverNow])
   const [remaining, setRemaining] = useState(0)
 
@@ -193,7 +194,7 @@ function Countdown({ deadline, serverNow, paused = false }: { deadline: string |
   }, [deadline, offsetMs, paused])
 
   const seconds = Math.ceil(remaining / 1000)
-  const fraction = deadline && !paused ? Math.min(1, remaining / Math.max(1000, new Date(deadline).getTime() - (new Date(serverNow).getTime()))) : 0
+  const fraction = paused ? 0 : Math.min(1, remaining / Math.max(1000, durationSeconds * 1000))
 
   return (
     <div className={`countdown ${seconds <= 5 && seconds > 0 ? 'urgent' : ''} ${paused ? 'is-paused' : ''}`}>
@@ -218,6 +219,46 @@ function PlayerStats({ player }: { player: Player }) {
   )
 }
 
+function Inventory({ items, disabled, onUse }: { items: InventoryItem[]; disabled: boolean; onUse: (itemId: string) => void }) {
+  return (
+    <div className="subpanel">
+      <div className="section-heading">INVENTORY <span className="heading-count">{items.length}</span></div>
+      {items.length === 0 ? <p className="muted">Empty. Search your zone or find a supply drop.</p> : (
+        <div className="inventory-grid">
+          {items.map((item) => (
+            <div key={item.id} className="item-card">
+              <div><strong>{item.name}</strong><span>{item.type.replace('_', ' ')}</span></div>
+              <p>{item.description}</p>
+              <button className="button button-secondary button-small" disabled={disabled} onClick={() => onUse(item.id)}>USE</button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function OpponentList({ opponents, disabled, onAttack }: { opponents: VisibleOpponent[]; disabled: boolean; onAttack: (playerId: string) => void }) {
+  return (
+    <div className="subpanel opponent-panel">
+      <div className="section-heading">PLAYERS IN YOUR ZONE <span className="heading-count">{opponents.length}</span></div>
+      {opponents.length === 0 ? <p className="muted">No other players are currently visible in this zone.</p> : (
+        <div className="opponent-list">
+          {opponents.map((opponent) => (
+            <div className="opponent-card" key={opponent.id}>
+              <div>
+                <strong>{opponent.name}</strong>
+                <span>{opponent.id} · {opponent.health}/{opponent.maxHealth} HP · {opponent.statusEffect}</span>
+              </div>
+              <button className="button button-danger button-small" disabled={disabled} onClick={() => onAttack(opponent.id)}>ATTACK</button>
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
 function PlayerGame() {
   const { state, error } = usePlayerSocket()
   const [actionError, setActionError] = useState('')
@@ -230,7 +271,7 @@ function PlayerGame() {
   const isFinished = state.status === 'GAME_OVER'
   const isPaused = state.status === 'PAUSED'
 
-  async function doAction(action: string, targetZoneId?: string) {
+  async function doAction(action: string, options?: { targetZoneId?: string; targetPlayerId?: string; itemId?: string }) {
     const raw = localStorage.getItem(PLAYER_STORAGE_KEY)
     if (!raw || submitting) return
     const session = JSON.parse(raw) as StoredSession
@@ -238,7 +279,7 @@ function PlayerGame() {
     setSubmitting(true)
     setSelectedAction(action)
     try {
-      await submitAction(session.sessionToken, session.player.id, action, targetZoneId)
+      await submitAction(session.sessionToken, session.player.id, action, options?.targetZoneId, options?.targetPlayerId, options?.itemId)
     } catch (err) {
       setActionError(err instanceof Error ? err.message : 'Action failed')
       setSelectedAction(null)
@@ -259,45 +300,52 @@ function PlayerGame() {
 
         <div className="round-strip">
           <div><span className="eyebrow">YOU</span><strong>{state.player.name}</strong><small>{state.player.id}</small></div>
-          <Countdown deadline={state.roundDeadline} serverNow={state.serverNow} paused={isPaused} />
+          <Countdown deadline={state.roundDeadline} serverNow={state.serverNow} durationSeconds={state.roundDurationSeconds} paused={isPaused} />
           <div className="round-strip-right"><span>ALIVE</span><strong>{state.aliveCount}/{state.playerCount}</strong></div>
         </div>
 
+        {state.zoneHazard && state.player.alive && <div className="warning-panel"><strong>HAZARD ACTIVE</strong><span>This zone will deal {state.hazardDamage} damage at the end of the round.</span></div>}
+
         {!state.player.alive ? (
-          <div className="eliminated-panel"><p className="eyebrow">ELIMINATED</p><h3>You are out of the arena.</h3><p>{state.player.lastResult}</p></div>
+          <div className="eliminated-panel"><p className="eyebrow">ELIMINATED</p><h3>The arena has claimed you.</h3><p>{state.player.lastResult}</p>{state.winnerId && <p>Winner: <strong>{state.winnerId}</strong></p>}</div>
         ) : isFinished ? (
-          <div className="eliminated-panel"><p className="eyebrow">GAME OVER</p><h3>{state.winnerId === state.player.id ? 'YOU SURVIVED.' : 'THE GAME HAS ENDED.'}</h3><p>{state.player.lastResult}</p></div>
+          <div className="event-focus"><p className="eyebrow">GAME OVER</p><h3>{state.winnerId === state.player.id ? 'YOU SURVIVED.' : 'THE ARENA IS CLOSED.'}</h3><p>{state.player.lastResult}</p></div>
         ) : isPaused ? (
-          <div className="placeholder-gameplay"><p className="eyebrow">ARENA PAUSED</p><h3>WAIT FOR THE ADMIN</h3><p>The current round is paused. Your remaining time will resume when the admin resumes the arena.</p></div>
+          <div className="event-focus"><p className="eyebrow">GAME PAUSED</p><h3>Stand by.</h3><p>The admin has paused the arena. Your timer is frozen.</p></div>
         ) : (
           <>
-            <div className="event-focus"><p className="eyebrow">CURRENT RESULT</p><p>{state.player.lastResult}</p></div>
-            {state.player.actionTaken ? (
-              <div className="waiting-panel"><div className="loading-dot" /><div><strong>You chose: {state.player.currentAction}</strong><p className="muted">Wait for the round to resolve. Your next choices will appear automatically.</p></div></div>
-            ) : (
-              <div className="action-panel">
-                <div><p className="eyebrow">WHAT WILL YOU DO?</p><h3>Choose one action.</h3></div>
-                <div className="action-grid">
-                  {state.availableActions.map((action) => (
-                    <button key={action} className={`button action-button ${selectedAction === action ? 'selected' : ''}`} disabled={!isPlayable || submitting} onClick={() => action === 'MOVE' ? undefined : void doAction(action)}>
-                      {action}
+            <div className="event-focus">
+              <p className="eyebrow">YOUR CURRENT RESULT</p>
+              <h3>{selectedAction ? `ACTION: ${selectedAction}` : 'Choose carefully.'}</h3>
+              <p>{state.player.lastResult}</p>
+              <p className="minor-note">You get one action per round. Missing the timer means elimination.</p>
+            </div>
+
+            <Inventory items={state.player.inventory} disabled={!isPlayable || submitting} onUse={(itemId) => void doAction('USE_ITEM', { itemId })} />
+
+            <OpponentList opponents={state.visibleOpponents} disabled={!isPlayable || submitting || !state.availableActions.includes('ATTACK')} onAttack={(playerId) => void doAction('ATTACK', { targetPlayerId: playerId })} />
+
+            <div className="action-panel">
+              <div>
+                <div className="section-heading">WHAT DO YOU DO?</div>
+                <p className="muted">One choice locks your action for this round.</p>
+              </div>
+              <div className="action-grid">
+                {['SEARCH', 'REST', 'HIDE', 'SCOUT', 'WAIT'].map((action) => (
+                  <button key={action} className={`button action-button ${selectedAction === action ? 'selected' : ''}`} disabled={!isPlayable || submitting || !state.availableActions.includes(action)} onClick={() => void doAction(action)}>{action}</button>
+                ))}
+              </div>
+              <div className="move-panel">
+                <div className="section-heading">MOVE TO AN ADJACENT ZONE</div>
+                <div className="move-grid">
+                  {state.adjacentZones.map((zone) => (
+                    <button key={zone.id} className="button button-secondary move-button" disabled={!isPlayable || submitting || !state.availableActions.includes('MOVE')} onClick={() => void doAction('MOVE', { targetZoneId: zone.id })}>
+                      <strong>{zone.name}</strong><small>{zone.description}</small>
                     </button>
                   ))}
                 </div>
-                {state.availableActions.includes('MOVE') && (
-                  <div className="move-panel">
-                    <div className="section-heading">MOVE TO</div>
-                    <div className="move-grid">
-                      {state.adjacentZones.map((zone) => (
-                        <button key={zone.id} className="button button-secondary move-button" disabled={!isPlayable || submitting} onClick={() => void doAction('MOVE', zone.id)}>
-                          <strong>{zone.name}</strong><small>{zone.description}</small>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                )}
               </div>
-            )}
+            </div>
           </>
         )}
 
@@ -308,9 +356,13 @@ function PlayerGame() {
         <div className="panel">
           <div className="section-heading">CURRENT ZONE</div>
           <p className="zone-big">{state.currentZone.name}</p>
-          <p className="muted">Players are not shown individually in Phase 2. Population counts will be exposed as the game systems expand.</p>
+          <p className="muted">{state.visibleOpponents.length + 1} active player{state.visibleOpponents.length === 0 ? '' : 's'} in this zone.</p>
+          <div className="zone-mini-stats">
+            <Stat label="LOOT CACHE" value={String(state.zoneLootCount)} />
+            <Stat label="YOUR KILLS" value={String(state.player.kills)} />
+          </div>
         </div>
-        <div className="panel"><EventFeed events={state.events} /></div>
+        <div className="panel"><EventFeed events={state.events} compact /></div>
       </aside>
     </section>
   )
@@ -322,6 +374,7 @@ function AdminPage() {
   const [state, setState] = useState<AdminState | null>(null)
   const [error, setError] = useState('')
   const [search, setSearch] = useState('')
+  const [eventZone, setEventZone] = useState('')
 
   async function login(event: FormEvent) {
     event.preventDefault()
@@ -357,6 +410,7 @@ function AdminPage() {
     const connect = () => {
       if (closed) return
       ws = new WebSocket(adminWsUrl(token))
+      ws.onopen = () => setError('')
       ws.onmessage = (message) => {
         const payload = JSON.parse(message.data) as { type: string; data: AdminState }
         if (payload.type === 'ADMIN_STATE') setState(payload.data)
@@ -374,12 +428,12 @@ function AdminPage() {
     }
   }, [authenticated])
 
-  async function doAction(action: string) {
+  async function doAction(action: string, targetZoneId?: string) {
     const token = localStorage.getItem(ADMIN_STORAGE_KEY)
     if (!token) return
     setError('')
     try {
-      const next = await adminAction(token, action) as AdminState
+      const next = await adminAction(token, action, targetZoneId) as AdminState
       setState(next)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Action failed')
@@ -395,7 +449,7 @@ function AdminPage() {
   const filteredPlayers = useMemo(() => {
     if (!state) return []
     const term = search.trim().toLowerCase()
-    return state.players.filter((player) => !term || player.name.toLowerCase().includes(term) || player.id.toLowerCase().includes(term))
+    return state.players.filter((player) => !term || player.name.toLowerCase().includes(term) || player.id.toLowerCase().includes(term) || player.zoneName.toLowerCase().includes(term))
   }, [search, state])
 
   if (!authenticated) {
@@ -436,9 +490,26 @@ function AdminPage() {
           {state.status === 'PAUSED' && <button className="button button-primary" onClick={() => void doAction('RESUME_GAME')}>RESUME</button>}
           <button className="button button-danger" onClick={() => { if (window.confirm('Reset the entire arena? All players will be removed.')) void doAction('RESET_GAME') }}>RESET</button>
         </div>
-        {state.status === 'ACTIVE' || state.status === 'PAUSED' ? <Countdown deadline={state.roundDeadline} serverNow={state.serverNow} paused={state.status === 'PAUSED'} /> : null}
+        {(state.status === 'ACTIVE' || state.status === 'PAUSED') && <Countdown deadline={state.roundDeadline} serverNow={state.serverNow} durationSeconds={state.roundDurationSeconds} paused={state.status === 'PAUSED'} />}
         {error && <div className="error">{error}</div>}
       </div>
+
+      {(state.status === 'ACTIVE' || state.status === 'PAUSED') && (
+        <div className="panel admin-events-controls">
+          <div>
+            <div className="section-heading">EVENT CONTROLS</div>
+            <p className="muted">Manual controls are useful if the organizers want to push the arena along during the live event.</p>
+          </div>
+          <div className="event-control-row">
+            <select value={eventZone} onChange={(e) => setEventZone(e.target.value)}>
+              <option value="">Random zone</option>
+              {state.zones.filter((zone) => zone.id !== 'cornucopia').map((zone) => <option key={zone.id} value={zone.id}>{zone.name}</option>)}
+            </select>
+            <button className="button button-secondary" onClick={() => void doAction('SPAWN_SUPPLY_DROP', eventZone || undefined)}>DROP SUPPLY</button>
+            <button className="button button-danger" onClick={() => void doAction('TRIGGER_HAZARD', eventZone || undefined)}>TRIGGER HAZARD</button>
+          </div>
+        </div>
+      )}
 
       <div className="zone-dashboard panel">
         <div className="section-heading">ARENA ZONES</div>
@@ -448,13 +519,14 @@ function AdminPage() {
       </div>
 
       <div className="panel">
-        <div className="table-toolbar"><div className="section-heading">PLAYERS</div><input className="table-search" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search player or ID" /></div>
+        <div className="table-toolbar"><div className="section-heading">PLAYERS</div><input className="table-search" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search player, ID or zone" /></div>
         <div className="player-table-wrap">
           <table>
-            <thead><tr><th>ID</th><th>Name</th><th>Zone</th><th>HP</th><th>ATK</th><th>SPD</th><th>Action</th><th>Status</th><th>Connection</th></tr></thead>
+            <thead><tr><th>ID</th><th>Name</th><th>Zone</th><th>HP</th><th>ATK</th><th>SPD</th><th>Items</th><th>Kills</th><th>Action</th><th>Status</th><th>Connection</th></tr></thead>
             <tbody>{filteredPlayers.map((player) => (
               <tr key={player.id}>
                 <td>{player.id}</td><td>{player.name}</td><td>{player.zoneName}</td><td>{player.health}</td><td>{player.attack}</td><td>{player.speed}</td>
+                <td>{player.inventory.length}</td><td>{player.kills}</td>
                 <td>{player.currentAction ?? (player.actionTaken ? 'DONE' : 'WAITING')}</td>
                 <td><span className={player.alive ? 'tag alive' : 'tag dead'}>{player.alive ? player.statusEffect : 'DEAD'}</span></td>
                 <td>{player.connected ? 'ONLINE' : 'OFFLINE'}</td>
@@ -464,14 +536,21 @@ function AdminPage() {
         </div>
       </div>
 
-      <div className="panel"><EventFeed events={state.events} /></div>
+      <div className="panel"><EventFeed events={state.events} compact /></div>
     </section>
   )
 }
 
 function ZoneAdminCard({ zone }: { zone: Zone }) {
   const count = zone.playerCount ?? 0
-  return <div className={`zone-card ${zone.id === 'cornucopia' ? 'cornucopia' : ''}`}><div className="zone-card-top"><strong>{zone.name}</strong><span>{count}</span></div><small>{zone.description}</small></div>
+  const loot = zone.lootCount ?? 0
+  return (
+    <div className={`zone-card ${zone.id === 'cornucopia' ? 'cornucopia' : ''} ${zone.hazard ? 'hazard' : ''}`}>
+      <div className="zone-card-top"><strong>{zone.name}</strong><span>{count}</span></div>
+      <small>{zone.description}</small>
+      <div className="zone-flags"><span>{loot} loot</span>{zone.hazard && <span className="hazard-flag">HAZARD</span>}</div>
+    </div>
+  )
 }
 
 function LoadingState({ text }: { text: string }) {

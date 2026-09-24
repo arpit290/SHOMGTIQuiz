@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import random
 import secrets
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -22,6 +23,12 @@ MAX_PLAYERS = int(os.getenv("MAX_PLAYERS", "200"))
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "change-me")
 ROUND_DURATION_SECONDS = max(5, int(os.getenv("ROUND_DURATION_SECONDS", "15")))
 FINAL_PLAYER_THRESHOLD = max(2, int(os.getenv("FINAL_PLAYER_THRESHOLD", "20")))
+SUPPLY_DROP_INTERVAL = max(1, int(os.getenv("SUPPLY_DROP_INTERVAL", "3")))
+HAZARD_INTERVAL = max(1, int(os.getenv("HAZARD_INTERVAL", "4")))
+HAZARD_DAMAGE = max(1, int(os.getenv("HAZARD_DAMAGE", "8")))
+MAX_INVENTORY = max(1, int(os.getenv("MAX_INVENTORY", "6")))
+
+rng = random.Random()
 
 
 # ---------------------------------------------------------------------------
@@ -48,6 +55,38 @@ class ZoneDefinition:
     name: str
     description: str
     connected_zones: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class ItemDefinition:
+    type: str
+    name: str
+    description: str
+
+
+@dataclass
+class Item:
+    id: str
+    type: str
+    name: str
+    description: str
+
+    def dict(self) -> dict[str, str]:
+        return {
+            "id": self.id,
+            "type": self.type,
+            "name": self.name,
+            "description": self.description,
+        }
+
+
+ITEM_DEFINITIONS: dict[str, ItemDefinition] = {
+    "MEDKIT": ItemDefinition("MEDKIT", "Medkit", "Restore 30 health."),
+    "FOOD": ItemDefinition("FOOD", "Food", "Restore 12 health."),
+    "WEAPON": ItemDefinition("WEAPON", "Weapon", "Use once to permanently gain +3 Attack."),
+    "ARMOR": ItemDefinition("ARMOR", "Armor", "Use to become Armored until your next round; the next hit against you is reduced by 8 damage."),
+    "SPEED_BOOST": ItemDefinition("SPEED_BOOST", "Speed Boost", "Use once to permanently gain +3 Speed."),
+}
 
 
 # Twelve outer zones form a ring; the Cornucopia is the central hub.
@@ -118,8 +157,13 @@ class Player:
     joined_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     session_token: str = field(default_factory=lambda: secrets.token_urlsafe(24))
     kills: int = 0
+    inventory: list[Item] = field(default_factory=list)
+
+    def inventory_dict(self) -> list[dict[str, str]]:
+        return [item.dict() for item in self.inventory]
 
     def public_dict(self) -> dict[str, Any]:
+        # This object is only sent to the player themselves (or the admin).
         return {
             "id": self.id,
             "name": self.name,
@@ -137,6 +181,7 @@ class Player:
             "statusEffect": self.status_effect,
             "lastResult": self.last_result,
             "kills": self.kills,
+            "inventory": self.inventory_dict(),
         }
 
     def admin_dict(self) -> dict[str, Any]:
@@ -157,6 +202,8 @@ class GameState:
     winner_id: str | None = None
     players: dict[str, Player] = field(default_factory=dict)
     event_log: list[dict[str, Any]] = field(default_factory=list)
+    zone_items: dict[str, list[Item]] = field(default_factory=lambda: {zone_id: [] for zone_id in ZONES})
+    hazard_zones: set[str] = field(default_factory=set)
 
     @property
     def alive_count(self) -> int:
@@ -236,7 +283,6 @@ class ConnectionManager:
             try:
                 await ws.send_json(payload)
             except Exception:
-                # Look up the owning player when cleaning the socket.
                 owner = next((pid for pid, sockets in self.player_connections.items() if ws in sockets), None)
                 if owner:
                     dead.append((owner, ws))
@@ -308,7 +354,7 @@ async def lifespan(_: FastAPI):
         round_task = None
 
 
-app = FastAPI(title="Arena RPG API", version="0.2.0", lifespan=lifespan)
+app = FastAPI(title="Arena RPG API", version="0.3.0", lifespan=lifespan)
 cors_origins = [origin.strip() for origin in os.getenv("CORS_ORIGINS", "*").split(",") if origin.strip()]
 app.add_middleware(
     CORSMiddleware,
@@ -333,19 +379,22 @@ class AdminLoginRequest(BaseModel):
 
 class AdminActionRequest(BaseModel):
     action: str
+    targetZoneId: str | None = None
 
 
 class PlayerActionRequest(BaseModel):
     playerId: str = Field(min_length=1, max_length=16)
     action: str
     targetZoneId: str | None = None
+    targetPlayerId: str | None = None
+    itemId: str | None = None
 
 
 # ---------------------------------------------------------------------------
 # Game engine helpers
 # ---------------------------------------------------------------------------
 
-ACTION_SET = {"MOVE", "SEARCH", "REST", "HIDE", "SCOUT", "WAIT"}
+ACTION_SET = {"MOVE", "SEARCH", "REST", "HIDE", "SCOUT", "ATTACK", "USE_ITEM", "WAIT"}
 
 
 def clean_name(name: str) -> str:
@@ -359,19 +408,69 @@ def next_player_id() -> str:
     return f"P-{index:03d}"
 
 
+def make_item(item_type: str) -> Item:
+    definition = ITEM_DEFINITIONS[item_type]
+    return Item(
+        id=f"I-{secrets.token_hex(5)}",
+        type=definition.type,
+        name=definition.name,
+        description=definition.description,
+    )
+
+
+def random_loot_type() -> str:
+    return rng.choices(
+        population=["FOOD", "MEDKIT", "WEAPON", "ARMOR", "SPEED_BOOST"],
+        weights=[28, 24, 20, 12, 16],
+        k=1,
+    )[0]
+
+
+def nearby_opponents(player: Player) -> list[Player]:
+    return [
+        other
+        for other in game.players.values()
+        if other.alive and other.id != player.id and other.zone_id == player.zone_id
+    ]
+
+
+def visible_opponent_dict(player: Player) -> list[dict[str, Any]]:
+    return [
+        {
+            "id": other.id,
+            "name": other.name,
+            "statusEffect": other.status_effect,
+            "health": other.health,
+            "maxHealth": other.max_health,
+        }
+        for other in nearby_opponents(player)
+    ]
+
+
 def available_actions(player: Player) -> list[str]:
     if not player.alive or game.status != GameStatus.ACTIVE or player.action_taken:
         return []
-    return sorted(ACTION_SET)
+
+    actions = {"MOVE", "SEARCH", "REST", "HIDE", "SCOUT", "WAIT"}
+    if nearby_opponents(player):
+        actions.add("ATTACK")
+    if player.inventory:
+        actions.add("USE_ITEM")
+    return sorted(actions)
 
 
-def public_zone_dict(zone: ZoneDefinition) -> dict[str, Any]:
-    return {
+def public_zone_dict(zone: ZoneDefinition, *, include_counts: bool = False) -> dict[str, Any]:
+    payload: dict[str, Any] = {
         "id": zone.id,
         "name": zone.name,
         "description": zone.description,
         "connectedZones": list(zone.connected_zones),
     }
+    if include_counts:
+        payload["playerCount"] = game.zone_counts[zone.id]
+        payload["lootCount"] = len(game.zone_items[zone.id])
+        payload["hazard"] = zone.id in game.hazard_zones
+    return payload
 
 
 def player_state(player: Player) -> dict[str, Any]:
@@ -388,6 +487,10 @@ def player_state(player: Player) -> dict[str, Any]:
         "availableActions": available_actions(player),
         "currentZone": public_zone_dict(ZONES[player.zone_id]),
         "adjacentZones": [public_zone_dict(ZONES[zone_id]) for zone_id in ZONES[player.zone_id].connected_zones],
+        "visibleOpponents": visible_opponent_dict(player),
+        "zoneLootCount": len(game.zone_items[player.zone_id]),
+        "zoneHazard": player.zone_id in game.hazard_zones,
+        "hazardDamage": HAZARD_DAMAGE,
         "playerCount": len(game.players),
         "aliveCount": game.alive_count,
         "maxPlayers": MAX_PLAYERS,
@@ -398,7 +501,6 @@ def player_state(player: Player) -> dict[str, Any]:
 
 def admin_state() -> dict[str, Any]:
     now = datetime.now(timezone.utc)
-    zone_counts = game.zone_counts
     return {
         "gameId": game.game_id,
         "status": game.status.value,
@@ -411,13 +513,7 @@ def admin_state() -> dict[str, Any]:
         "aliveCount": game.alive_count,
         "maxPlayers": MAX_PLAYERS,
         "winnerId": game.winner_id,
-        "zones": [
-            {
-                **public_zone_dict(zone),
-                "playerCount": zone_counts[zone.id],
-            }
-            for zone in ZONES.values()
-        ],
+        "zones": [public_zone_dict(zone, include_counts=True) for zone in ZONES.values()],
         "players": [p.admin_dict() for p in game.players.values()],
         "events": game.event_log[-100:],
     }
@@ -432,22 +528,58 @@ def assign_starting_zones_locked() -> None:
         player.alive = True
         player.action_taken = False
         player.current_action = None
+        player.action_deadline = None
         player.status_effect = "NORMAL"
         player.last_result = f"You begin in {ZONES[player.zone_id].name}."
         player.kills = 0
+        player.inventory.clear()
+
+    for zone_id in game.zone_items:
+        game.zone_items[zone_id].clear()
+    game.hazard_zones.clear()
+
+    # Small opening cache so the central area is worth contesting early.
+    for _ in range(8):
+        game.zone_items["cornucopia"].append(make_item(random_loot_type()))
+    game.add_event("The Cornucopia has been stocked with supplies.", "SUPPLY_DROP")
 
 
 def _set_phase_locked() -> None:
     if game.alive_count <= 1:
         game.phase = GamePhase.GAME_OVER
     elif game.round_number <= 1:
-        # The first round is always the opening, even if a tiny test game
-        # happens to be below the final-player threshold.
         game.phase = GamePhase.OPENING
     elif game.alive_count <= FINAL_PLAYER_THRESHOLD:
         game.phase = GamePhase.FINAL
     else:
         game.phase = GamePhase.MAIN
+
+
+def _spawn_supply_drops_locked() -> None:
+    eligible = [zone_id for zone_id in OUTER_ZONE_IDS if zone_id not in game.hazard_zones]
+    if not eligible:
+        eligible = list(OUTER_ZONE_IDS)
+    drop_count = 2 if game.phase == GamePhase.FINAL else 3
+    chosen_zones = rng.sample(eligible, k=min(drop_count, len(eligible)))
+    for zone_id in chosen_zones:
+        item_count = rng.randint(1, 2)
+        for _ in range(item_count):
+            game.zone_items[zone_id].append(make_item(random_loot_type()))
+    names = ", ".join(ZONES[zone_id].name for zone_id in chosen_zones)
+    game.add_event(f"Supply drops have landed in {names}.", "SUPPLY_DROP")
+
+
+def _spawn_hazards_locked() -> None:
+    game.hazard_zones.clear()
+    eligible = list(OUTER_ZONE_IDS)
+    hazard_count = 2 if game.phase == GamePhase.FINAL else 1
+    for zone_id in rng.sample(eligible, k=min(hazard_count, len(eligible))):
+        game.hazard_zones.add(zone_id)
+    names = ", ".join(ZONES[zone_id].name for zone_id in game.hazard_zones)
+    game.add_event(
+        f"Arena hazard active in {names}. Players there will take {HAZARD_DAMAGE} damage at round end.",
+        "ARENA_HAZARD",
+    )
 
 
 def _begin_round_locked() -> None:
@@ -464,10 +596,22 @@ def _begin_round_locked() -> None:
             player.current_action = None
             player.action_taken = False
             player.action_deadline = game.round_deadline
-            player.status_effect = "NORMAL"
+            if player.status_effect == "ARMORED":
+                # Armor lasts through the round in which it was used; it is cleared
+                # at the next round start if it survived unused.
+                player.status_effect = "NORMAL"
+            elif player.status_effect == "HIDDEN":
+                player.status_effect = "NORMAL"
             player.last_result = f"Round {game.round_number} has begun. Choose your action."
         else:
             player.action_deadline = None
+
+    if game.round_number > 1 and game.round_number % SUPPLY_DROP_INTERVAL == 0:
+        _spawn_supply_drops_locked()
+    if game.round_number > 1 and game.round_number % HAZARD_INTERVAL == 0:
+        _spawn_hazards_locked()
+    else:
+        game.hazard_zones.clear()
 
     game.add_event(
         f"Round {game.round_number} has begun. Players have {ROUND_DURATION_SECONDS} seconds to act.",
@@ -487,13 +631,14 @@ def _finish_game_locked() -> None:
     game.status = GameStatus.GAME_OVER
     game.phase = GamePhase.GAME_OVER
     game.round_deadline = None
+    game.hazard_zones.clear()
 
     for player in game.players.values():
         player.action_deadline = None
         player.action_taken = True
 
 
-def _eliminate_player_locked(player: Player, reason: str) -> dict[str, Any]:
+def _eliminate_player_locked(player: Player, reason: str, *, killer: Player | None = None) -> dict[str, Any]:
     if not player.alive:
         return game.add_event(f"{player.name} was already eliminated.", "INFO")
     player.alive = False
@@ -503,7 +648,32 @@ def _eliminate_player_locked(player: Player, reason: str) -> dict[str, Any]:
     player.current_action = None
     player.status_effect = "ELIMINATED"
     player.last_result = reason
+    if killer is not None and killer.id != player.id:
+        killer.kills += 1
     return game.add_event(reason, "PLAYER_ELIMINATED")
+
+
+def _apply_hazard_damage_locked() -> list[dict[str, Any]]:
+    events: list[dict[str, Any]] = []
+    if not game.hazard_zones:
+        return events
+
+    for player in list(game.players.values()):
+        if not player.alive or player.zone_id not in game.hazard_zones:
+            continue
+        old_health = player.health
+        player.health = max(0, player.health - HAZARD_DAMAGE)
+        player.last_result = f"The hazard in {ZONES[player.zone_id].name} dealt {old_health - player.health} damage."
+        events.append(game.add_event(
+            f"{player.name} took {old_health - player.health} hazard damage in {ZONES[player.zone_id].name}.",
+            "HAZARD_DAMAGE",
+        ))
+        if player.health <= 0:
+            events.append(_eliminate_player_locked(
+                player,
+                f"{player.name} ({player.id}) was eliminated by the arena hazard in {ZONES[player.zone_id].name}.",
+            ))
+    return events
 
 
 def _resolve_round_locked() -> None:
@@ -522,6 +692,8 @@ def _resolve_round_locked() -> None:
             f"{player.name} ({player.id}) failed to act before the timer expired and was eliminated.",
         )
 
+    _apply_hazard_damage_locked()
+
     if game.alive_count <= 1:
         _finish_game_locked()
         return
@@ -534,6 +706,8 @@ def _validate_player_action_locked(
     player: Player,
     action: str,
     target_zone_id: str | None,
+    target_player_id: str | None,
+    item_id: str | None,
 ) -> tuple[bool, str]:
     action = action.upper()
 
@@ -558,16 +732,144 @@ def _validate_player_action_locked(
         if target_zone_id not in ZONES[player.zone_id].connected_zones:
             return False, "You cannot move directly to that zone."
 
+    if action == "ATTACK":
+        if not target_player_id:
+            return False, "Choose a player to attack."
+        target = game.players.get(target_player_id)
+        if not target or not target.alive:
+            return False, "That player is not available."
+        if target.id == player.id:
+            return False, "You cannot attack yourself."
+        if target.zone_id != player.zone_id:
+            return False, "That player is no longer in your zone."
+
+    if action == "USE_ITEM":
+        if not item_id:
+            return False, "Choose an item to use."
+        item = next((candidate for candidate in player.inventory if candidate.id == item_id), None)
+        if item is None:
+            return False, "That item is no longer in your inventory."
+        if item.type == "MEDKIT" and player.health >= player.max_health:
+            return False, "Your health is already full."
+        if item.type == "FOOD" and player.health >= player.max_health:
+            return False, "Your health is already full."
+
     return True, ""
+
+
+def _resolve_attack_locked(attacker: Player, target: Player) -> dict[str, Any]:
+    dodge_chance = 0.05 + max(0, target.speed - attacker.speed) * 0.03
+    if target.status_effect == "HIDDEN":
+        dodge_chance += 0.15
+    dodge_chance = min(0.45, max(0.05, dodge_chance))
+
+    if rng.random() < dodge_chance:
+        attacker.last_result = f"Your attack on {target.name} was dodged."
+        target.last_result = f"You dodged an attack from {attacker.name}."
+        return game.add_event(
+            f"{attacker.name} attacked {target.name}, but the attack was dodged.",
+            "ATTACK_DODGED",
+        )
+
+    base_damage = max(1, attacker.attack + rng.randint(-2, 4))
+    critical = rng.random() < 0.10
+    if critical:
+        base_damage += 5
+
+    reduction = 0
+    if target.status_effect == "ARMORED":
+        reduction = 8
+        target.status_effect = "NORMAL"
+
+    damage = max(1, base_damage - reduction)
+    old_health = target.health
+    target.health = max(0, target.health - damage)
+    target.last_result = f"{attacker.name} hit you for {damage} damage. You have {target.health} health left."
+
+    prefix = " Critical hit!" if critical else ""
+    armor_text = " Armor absorbed 8 damage." if reduction else ""
+    attacker.last_result = f"You hit {target.name} for {damage} damage.{prefix}{armor_text}"
+
+    event = game.add_event(
+        f"{attacker.name} attacked {target.name} for {damage} damage.{(' Critical hit.' if critical else '')}{(' Armor reduced the damage.' if reduction else '')}",
+        "PLAYER_ATTACKED",
+    )
+
+    if target.health <= 0:
+        target.status_effect = "ELIMINATED"
+        _eliminate_player_locked(
+            target,
+            f"{target.name} ({target.id}) was eliminated by {attacker.name} in {ZONES[target.zone_id].name}.",
+            killer=attacker,
+        )
+    else:
+        # `old_health` is intentionally retained in the local resolution for clarity
+        # and easier debugging if this mechanic expands later.
+        _ = old_health
+
+    return event
+
+
+def _use_item_locked(player: Player, item_id: str) -> dict[str, Any]:
+    item_index = next((index for index, item in enumerate(player.inventory) if item.id == item_id), None)
+    if item_index is None:
+        raise HTTPException(status_code=409, detail="That item is no longer in your inventory.")
+
+    item = player.inventory[item_index]
+    if item.type == "MEDKIT":
+        old_health = player.health
+        player.health = min(player.max_health, player.health + 30)
+        player.last_result = f"You used a Medkit and recovered {player.health - old_health} health."
+    elif item.type == "FOOD":
+        old_health = player.health
+        player.health = min(player.max_health, player.health + 12)
+        player.last_result = f"You ate and recovered {player.health - old_health} health."
+    elif item.type == "WEAPON":
+        player.attack += 3
+        player.last_result = "You equipped the Weapon. Attack increased by 3."
+    elif item.type == "ARMOR":
+        player.status_effect = "ARMORED"
+        player.last_result = "You prepared the Armor. The next hit against you will be reduced by 8 damage."
+    elif item.type == "SPEED_BOOST":
+        player.speed += 3
+        player.last_result = "You used the Speed Boost. Speed increased by 3."
+    else:
+        raise HTTPException(status_code=409, detail="Unknown item.")
+
+    player.inventory.pop(item_index)
+    return game.add_event(f"{player.name} used a {item.name} in {ZONES[player.zone_id].name}.", "ITEM_USED")
+
+
+def _search_locked(player: Player) -> dict[str, Any]:
+    if len(player.inventory) >= MAX_INVENTORY:
+        player.last_result = f"You searched the area, but your inventory is full ({MAX_INVENTORY} items)."
+        return game.add_event(f"{player.name} searched {ZONES[player.zone_id].name}, but their inventory was full.", "PLAYER_SEARCHED")
+
+    if game.zone_items[player.zone_id]:
+        item = game.zone_items[player.zone_id].pop(0)
+        player.inventory.append(item)
+        player.last_result = f"You found a {item.name}. {item.description}"
+        return game.add_event(f"{player.name} found supplies in {ZONES[player.zone_id].name}.", "ITEM_FOUND")
+
+    if rng.random() < 0.40:
+        item = make_item(random_loot_type())
+        player.inventory.append(item)
+        player.last_result = f"You found a {item.name}. {item.description}"
+        return game.add_event(f"{player.name} found supplies while searching {ZONES[player.zone_id].name}.", "ITEM_FOUND")
+
+    player.last_result = "You searched the area but found nothing useful."
+    return game.add_event(f"{player.name} searched {ZONES[player.zone_id].name} but found nothing.", "PLAYER_SEARCHED")
 
 
 def _apply_player_action_locked(
     player: Player,
     action: str,
     target_zone_id: str | None,
+    target_player_id: str | None,
+    item_id: str | None,
 ) -> dict[str, Any]:
     action = action.upper()
-    valid, error = _validate_player_action_locked(player, action, target_zone_id)
+    valid, error = _validate_player_action_locked(player, action, target_zone_id, target_player_id, item_id)
     if not valid:
         raise HTTPException(status_code=409, detail=error)
 
@@ -579,10 +881,7 @@ def _apply_player_action_locked(
         previous = player.zone_id
         player.zone_id = target_zone_id or player.zone_id
         player.last_result = f"You moved from {ZONES[previous].name} to {ZONES[player.zone_id].name}."
-        event = game.add_event(
-            f"{player.name} moved to {ZONES[player.zone_id].name}.",
-            "PLAYER_MOVED",
-        )
+        event = game.add_event(f"{player.name} moved to {ZONES[player.zone_id].name}.", "PLAYER_MOVED")
     elif action == "REST":
         old_health = player.health
         player.health = min(player.max_health, player.health + 5)
@@ -590,7 +889,7 @@ def _apply_player_action_locked(
         event = game.add_event(f"{player.name} rested in {ZONES[player.zone_id].name}.", "PLAYER_RESTED")
     elif action == "HIDE":
         player.status_effect = "HIDDEN"
-        player.last_result = "You found cover and are hidden for this round."
+        player.last_result = "You found cover. If someone attacks you this round, your dodge chance is higher."
         event = game.add_event(f"{player.name} disappeared into cover in {ZONES[player.zone_id].name}.", "PLAYER_HID")
     elif action == "SCOUT":
         adjacent = ZONES[player.zone_id].connected_zones
@@ -598,8 +897,16 @@ def _apply_player_action_locked(
         player.last_result = "Nearby population: " + ", ".join(counts) + "."
         event = game.add_event(f"{player.name} scouted the area.", "PLAYER_SCOUTED")
     elif action == "SEARCH":
-        player.last_result = "You searched the area but found nothing useful yet. Items arrive in Phase 3."
-        event = game.add_event(f"{player.name} searched {ZONES[player.zone_id].name}.", "PLAYER_SEARCHED")
+        event = _search_locked(player)
+    elif action == "ATTACK":
+        target = game.players.get(target_player_id or "")
+        if not target or not target.alive:
+            raise HTTPException(status_code=409, detail="That player is no longer available.")
+        event = _resolve_attack_locked(player, target)
+        if not target.alive and game.alive_count <= 1:
+            _finish_game_locked()
+    elif action == "USE_ITEM":
+        event = _use_item_locked(player, item_id or "")
     else:  # WAIT
         player.last_result = "You waited and watched your surroundings."
         event = game.add_event(f"{player.name} waited in {ZONES[player.zone_id].name}.", "PLAYER_WAITED")
@@ -640,7 +947,10 @@ async def sync_action_result(player_id: str, event: dict[str, Any]) -> None:
         snapshot = player_state(game.players[player_id]) if player_id in game.players else None
         admin_snapshot = admin_state()
 
-    sends = [manager.broadcast_players({"type": "PUBLIC_EVENT", "data": event}), manager.broadcast_admin({"type": "ADMIN_STATE", "data": admin_snapshot})]
+    sends = [
+        manager.broadcast_players({"type": "PUBLIC_EVENT", "data": event}),
+        manager.broadcast_admin({"type": "ADMIN_STATE", "data": admin_snapshot}),
+    ]
     if snapshot is not None:
         sends.append(manager.send_player(player_id, {"type": "GAME_STATE", "data": snapshot}))
     await asyncio.gather(*sends)
@@ -674,7 +984,7 @@ async def get_game() -> dict[str, Any]:
 @app.get("/api/zones")
 async def get_zones() -> list[dict[str, Any]]:
     async with state_lock:
-        return [public_zone_dict(zone) for zone in ZONES.values()]
+        return [public_zone_dict(zone, include_counts=True) for zone in ZONES.values()]
 
 
 @app.post("/api/join")
@@ -712,7 +1022,7 @@ async def join_game(request: JoinRequest) -> dict[str, Any]:
     )
 
     return {
-        "player": player.public_dict(),
+        "player": player_snapshot["player"],
         "sessionToken": player.session_token,
         "game": current_game,
     }
@@ -728,7 +1038,13 @@ async def player_action(
         if not player:
             raise HTTPException(status_code=404, detail="Player not found")
         require_player_token(player, x_player_token)
-        event = _apply_player_action_locked(player, request.action, request.targetZoneId)
+        event = _apply_player_action_locked(
+            player,
+            request.action,
+            request.targetZoneId,
+            request.targetPlayerId,
+            request.itemId,
+        )
         snapshot = player_state(player)
 
     await sync_action_result(player.id, event)
@@ -794,6 +1110,30 @@ async def admin_action(
             if game.status != GameStatus.ACTIVE:
                 raise HTTPException(status_code=409, detail="Game is not active")
             _resolve_round_locked()
+        elif action == "SPAWN_SUPPLY_DROP":
+            if game.status not in {GameStatus.ACTIVE, GameStatus.PAUSED}:
+                raise HTTPException(status_code=409, detail="Supply drops can only be triggered during the game")
+            target = request.targetZoneId
+            if target is not None and target not in ZONES:
+                raise HTTPException(status_code=400, detail="Unknown zone")
+            chosen = target or rng.choice(list(OUTER_ZONE_IDS))
+            game.zone_items[chosen].append(make_item(random_loot_type()))
+            game.add_event(f"The admin dropped supplies in {ZONES[chosen].name}.", "SUPPLY_DROP")
+        elif action == "TRIGGER_HAZARD":
+            if game.status not in {GameStatus.ACTIVE, GameStatus.PAUSED}:
+                raise HTTPException(status_code=409, detail="Hazards can only be triggered during the game")
+            target = request.targetZoneId
+            if target is not None and target not in OUTER_ZONE_IDS:
+                raise HTTPException(status_code=400, detail="Hazards can only target outer zones")
+            if target:
+                game.hazard_zones = {target}
+            else:
+                game.hazard_zones = {rng.choice(list(OUTER_ZONE_IDS))}
+            names = ", ".join(ZONES[zone_id].name for zone_id in game.hazard_zones)
+            game.add_event(
+                f"Admin activated an arena hazard in {names}. Players there will take {HAZARD_DAMAGE} damage at round end.",
+                "ARENA_HAZARD",
+            )
         elif action == "RESET_GAME":
             reset_requested = True
             game.status = GameStatus.LOBBY
@@ -804,6 +1144,9 @@ async def admin_action(
             game.winner_id = None
             game.players.clear()
             game.event_log.clear()
+            for items in game.zone_items.values():
+                items.clear()
+            game.hazard_zones.clear()
             game.add_event("The arena has been reset. Waiting for players.", "GAME_RESET")
         else:
             raise HTTPException(status_code=400, detail="Unsupported admin action")
@@ -871,4 +1214,3 @@ async def admin_ws(websocket: WebSocket, token: str | None = None) -> None:
                 await websocket.send_json({"type": "PONG"})
     except WebSocketDisconnect:
         manager.disconnect_admin(websocket)
-

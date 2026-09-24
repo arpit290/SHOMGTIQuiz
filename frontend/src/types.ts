@@ -1,12 +1,29 @@
 export type GameStatus = 'LOBBY' | 'ACTIVE' | 'PAUSED' | 'GAME_OVER'
 export type GamePhase = 'OPENING' | 'MAIN' | 'FINAL' | 'GAME_OVER'
 
+export type InventoryItem = {
+  id: string
+  type: string
+  name: string
+  description: string
+}
+
+export type VisibleOpponent = {
+  id: string
+  name: string
+  statusEffect: string
+  health: number
+  maxHealth: number
+}
+
 export type Zone = {
   id: string
   name: string
   description: string
   connectedZones: string[]
   playerCount?: number
+  lootCount?: number
+  hazard?: boolean
 }
 
 export type Player = {
@@ -26,6 +43,7 @@ export type Player = {
   statusEffect: string
   lastResult: string
   kills: number
+  inventory: InventoryItem[]
   joinedAt?: string
 }
 
@@ -48,6 +66,10 @@ export type PlayerGameState = {
   availableActions: string[]
   currentZone: Zone
   adjacentZones: Zone[]
+  visibleOpponents: VisibleOpponent[]
+  zoneLootCount: number
+  zoneHazard: boolean
+  hazardDamage: number
   playerCount: number
   aliveCount: number
   maxPlayers: number

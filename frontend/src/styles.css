@@ -138,3 +138,38 @@ th { color: #7f7b74; text-transform: uppercase; letter-spacing: .09em; font-size
   .stat-grid, .stat-grid.three, .admin-metrics { grid-template-columns: 1fr; }
   .zone-grid { grid-template-columns: 1fr; }
 }
+
+.subpanel { border: 1px solid #2b2e33; background: #0d0f12; padding: 17px; display: grid; gap: 13px; }
+.heading-count { float: right; min-width: 22px; text-align: center; padding: 2px 6px; border: 1px solid #36393e; color: #d8d2c7; }
+.inventory-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; }
+.item-card { border: 1px solid #2b2e33; background: #121418; padding: 12px; display: grid; gap: 9px; }
+.item-card > div:first-child { display: grid; gap: 4px; }
+.item-card strong { font-size: .86rem; }
+.item-card span { color: #77736c; font-size: .62rem; letter-spacing: .11em; }
+.item-card p { color: #9b978f; line-height: 1.45; font-size: .72rem; margin: 0; }
+.opponent-list { display: grid; gap: 8px; }
+.opponent-card { border: 1px solid #2b2e33; background: #121418; padding: 11px 12px; display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.opponent-card > div { display: grid; gap: 4px; min-width: 0; }
+.opponent-card strong { font-size: .85rem; overflow: hidden; text-overflow: ellipsis; }
+.opponent-card span { color: #77736c; font-size: .66rem; }
+.warning-panel { border: 1px solid #67562f; background: #17150f; padding: 13px 14px; display: grid; gap: 4px; }
+.warning-panel strong { color: #e7d5a3; font-size: .68rem; letter-spacing: .14em; }
+.warning-panel span { color: #b3a989; font-size: .78rem; }
+.zone-mini-stats { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; margin-top: 14px; }
+.admin-events-controls { display: grid; gap: 13px; }
+.event-control-row { display: flex; gap: 9px; align-items: center; flex-wrap: wrap; }
+select { background: #0b0c0e; color: #eee9df; border: 1px solid #35383e; padding: 11px 12px; min-width: 190px; outline: none; }
+select:focus { border-color: #827d72; }
+.zone-flags { display: flex; align-items: center; gap: 7px; color: #77736c; font-size: .63rem; letter-spacing: .08em; }
+.zone-card.hazard { border-color: #67562f; background: #17140f; }
+.hazard-flag { color: #e5d49e; border: 1px solid #67562f; padding: 3px 5px; }
+.event-feed.compact .event-item { font-size: .74rem; }
+.minor-note { font-size: .72rem !important; color: #77736c !important; }
+
+@media (max-width: 700px) {
+  .inventory-grid { grid-template-columns: 1fr; }
+  .opponent-card { align-items: stretch; flex-direction: column; }
+  .opponent-card .button { width: 100%; }
+  .event-control-row { align-items: stretch; flex-direction: column; }
+  .event-control-row select, .event-control-row .button { width: 100%; }
+}

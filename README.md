@@ -1,8 +1,8 @@
-# The Arena — Phase 2
+# The Arena — Phase 3
 
-A college-event prototype for a single-instance, text-first multiplayer arena game.
+A college-event prototype for a **single-instance, text-first multiplayer arena game** designed for roughly **200 participants in one shared match**.
 
-The project is designed for roughly **200 participants in one shared game** rather than multiple games or a production MMORPG architecture.
+Phase 3 adds the first real survival systems: combat, items, inventory, supply drops, and arena hazards.
 
 ## Stack
 
@@ -11,30 +11,75 @@ The project is designed for roughly **200 participants in one shared game** rath
 - WebSockets for real-time updates
 - In-memory game state for the live event
 
-## Phase 2 includes
+## Phase 3 includes
 
-- One shared game (`main_game`)
+### Core game
+
+- One shared game: `main_game`
 - 200-player cap
-- Player registration and session tokens
-- 12 outer zones + central Cornucopia
-- Zone graph and validated movement
-- Health / Attack / Speed stats
+- 13 zones: 12 outer zones + central Cornucopia
 - Global timed rounds (15 seconds by default)
 - Backend-authoritative deadlines
 - One action per player per round
-- Timeout elimination
-- Late submission elimination
-- MOVE / SEARCH / REST / HIDE / SCOUT / WAIT
-- OPENING / MAIN / FINAL / GAME_OVER phases
-- Admin pause / resume / end-round / reset controls
-- Live admin zone population overview
-- Searchable admin player table
-- Mobile-friendly player game view
-- Reconnection handling
+- Timeout and late-submission elimination
+- Opening / Main / Final / Game Over phases
 
-## Phase 3 will add
+### Actions
 
-Combat, attacks, damage rules, items, inventory, supply drops, and richer random events.
+- MOVE
+- SEARCH
+- REST
+- HIDE
+- SCOUT
+- ATTACK
+- USE_ITEM
+- WAIT
+
+### Combat
+
+- Attack only against an alive player in the same zone
+- Damage is based on Attack with a small random modifier
+- Speed influences dodge chance
+- HIDDEN players get an extra dodge bonus
+- Small critical-hit chance
+- Armor can reduce the next incoming hit
+- Health reaching zero causes elimination
+- Killer receives +1 kill
+
+### Items
+
+- Medkit: restore 30 HP
+- Food: restore 12 HP
+- Weapon: permanently +3 Attack
+- Armor: next incoming hit reduced by 8
+- Speed Boost: permanently +3 Speed
+- Inventory limit: 6 by default
+- Search can find random loot
+- Cornucopia starts with 8 items
+- Automatic supply drops every 3 rounds
+
+### Arena events
+
+- Automatic arena hazards every 4 rounds
+- Default hazard damage: 8 HP at round end
+- Final phase can use two hazard zones instead of one
+- Admin can manually trigger a supply drop
+- Admin can manually trigger a hazard
+
+### Admin dashboard
+
+- Live game status
+- Round and timer
+- Alive / registered counts
+- Zone population
+- Loot count per zone
+- Active hazard zones
+- Searchable 200-player table
+- Player HP / Attack / Speed
+- Item count and kills
+- Live event feed
+- Start / Pause / Resume / End Round / Reset
+- Manual supply drop / hazard controls
 
 ## Run the backend
 
@@ -50,11 +95,15 @@ source .venv/bin/activate
 
 pip install -r requirements.txt
 
-# Optional: configure the event
+# Optional event configuration
 # PowerShell:
 # $env:ADMIN_TOKEN="your-strong-admin-token"
 # $env:ROUND_DURATION_SECONDS="15"
 # $env:FINAL_PLAYER_THRESHOLD="20"
+# $env:SUPPLY_DROP_INTERVAL="3"
+# $env:HAZARD_INTERVAL="4"
+# $env:HAZARD_DAMAGE="8"
+# $env:MAX_INVENTORY="6"
 
 uvicorn app:app --host 0.0.0.0 --port 8000
 ```
@@ -76,7 +125,7 @@ npm install
 npm run dev -- --host 0.0.0.0
 ```
 
-For a college LAN, participants should open:
+For a college LAN, participants can open:
 
 ```text
 http://YOUR-LAN-IP:5173
@@ -92,31 +141,48 @@ Default values:
 MAX_PLAYERS=200
 ROUND_DURATION_SECONDS=15
 FINAL_PLAYER_THRESHOLD=20
+SUPPLY_DROP_INTERVAL=3
+HAZARD_INTERVAL=4
+HAZARD_DAMAGE=8
+MAX_INVENTORY=6
 ADMIN_TOKEN=change-me
 ```
 
-The active game is intentionally held in memory. This is appropriate for the event prototype, but the game will reset if the backend process restarts. For the actual event, keep the backend process on a stable host and avoid auto-reload.
+The live game state is intentionally held in memory. This is appropriate for the event prototype, but the match resets if the backend process restarts.
 
-## Important gameplay rule
+For the actual event:
 
-The frontend timer is only a display. The FastAPI backend owns the actual round deadline, so changing browser time or disabling the JavaScript timer cannot extend a player's turn.
+- Set a non-default `ADMIN_TOKEN`.
+- Run the backend on a stable machine.
+- Avoid auto-reload during the live match.
+- Test from the same Wi-Fi/LAN that participants will use.
 
-## Architecture
+## Game-state privacy
 
-```text
-React player clients (~200)
-        |
-        | REST + WebSocket
-        v
-     FastAPI
-        |
-        v
-    Game State
-        |
-   Game Engine rules
-   /      |       \\
-movement rounds  actions
-        |
-        v
- Admin Dashboard
-```
+Players receive their own full player state, inventory, and currently visible same-zone opponents. Admin receives the full game state. Public event messages are small and do not expose another player's private inventory.
+
+## Concurrency model
+
+All player actions mutate the shared game state under one `asyncio.Lock`. This is deliberately simple for an event-sized game and prevents simultaneous requests from corrupting player/zone state.
+
+The backend does not run one simulation loop per participant. It runs one lightweight round timer for the entire match.
+
+## Phase 3 test status
+
+The backend test suite contains 18 tests covering:
+
+- 13-zone setup
+- Stats and inventory
+- Movement
+- Search and loot
+- Combat and elimination
+- Items
+- Armor
+- Admin events
+- Timed round resolution
+- Pause / resume
+- 200-player registration
+
+## Next phase
+
+Phase 4 should focus on real-time/admin polish: richer admin controls, better event orchestration, reconnect UX, and more event-specific presentation. Advanced combat complexity is not necessary unless the college event rules require it.
