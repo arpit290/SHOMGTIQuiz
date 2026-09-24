@@ -1,20 +1,20 @@
-# The Arena — Phase 3
+# The Arena — Phase 4
 
-A college-event prototype for a **single-instance, text-first multiplayer arena game** designed for roughly **200 participants in one shared match**.
+A college-event prototype for a **single shared, text-first multiplayer arena game** designed for roughly **200 participants in one match**.
 
-Phase 3 adds the first real survival systems: combat, items, inventory, supply drops, and arena hazards.
+Phase 4 focuses on making the existing game practical to operate live: stronger admin tooling, real-time connection status, player-state corrections, event announcements, and a lightweight restart checkpoint.
 
 ## Stack
 
 - FastAPI + Python backend
 - React + TypeScript + Vite frontend
 - WebSockets for real-time updates
-- In-memory game state for the live event
+- In-memory live game state
+- JSON checkpoint for restart recovery
 
-## Phase 3 includes
+## Phase 4 includes
 
-### Core game
-
+### Existing game systems
 - One shared game: `main_game`
 - 200-player cap
 - 13 zones: 12 outer zones + central Cornucopia
@@ -23,63 +23,52 @@ Phase 3 adds the first real survival systems: combat, items, inventory, supply d
 - One action per player per round
 - Timeout and late-submission elimination
 - Opening / Main / Final / Game Over phases
+- MOVE, SEARCH, REST, HIDE, SCOUT, ATTACK, USE_ITEM, WAIT
+- Combat, inventory, loot, supply drops, and arena hazards
 
-### Actions
+### Admin dashboard improvements
+- Live `ONLINE`, `ACTED`, and `WAITING` counts
+- Action-progress bar for the current round
+- Searchable player table with selectable rows
+- Manual player operations:
+  - Eliminate a player
+  - Restore a player
+  - Set health
+  - Set health + attack + speed
+  - Move a player to another zone
+  - Grant a specific item
+- Manual event controls:
+  - Supply drop
+  - Arena hazard
+  - Clear hazards
+  - Broadcast an announcement to all players
+- Connection indicator for the admin WebSocket
 
-- MOVE
-- SEARCH
-- REST
-- HIDE
-- SCOUT
-- ATTACK
-- USE_ITEM
-- WAIT
+### Reconnection
+- Player WebSocket reconnects automatically after a disconnect
+- Admin WebSocket reconnects automatically
+- Reconnection status is shown to the user/admin
+- Reconnected clients receive a fresh authoritative state snapshot
+- Refreshing a page does not create a new player as long as the stored session remains valid
 
-### Combat
+### Restart recovery
+The live game is still held in memory, but Phase 4 also writes a lightweight checkpoint to:
 
-- Attack only against an alive player in the same zone
-- Damage is based on Attack with a small random modifier
-- Speed influences dodge chance
-- HIDDEN players get an extra dodge bonus
-- Small critical-hit chance
-- Armor can reduce the next incoming hit
-- Health reaching zero causes elimination
-- Killer receives +1 kill
+```text
+arena_state.json
+```
 
-### Items
+Configure the path with:
 
-- Medkit: restore 30 HP
-- Food: restore 12 HP
-- Weapon: permanently +3 Attack
-- Armor: next incoming hit reduced by 8
-- Speed Boost: permanently +3 Speed
-- Inventory limit: 6 by default
-- Search can find random loot
-- Cornucopia starts with 8 items
-- Automatic supply drops every 3 rounds
+```text
+ARENA_STATE_FILE=/path/to/arena_state.json
+```
 
-### Arena events
+The checkpoint contains the shared game, players, inventory, zones, event log, timers, and player session tokens needed for reconnection.
 
-- Automatic arena hazards every 4 rounds
-- Default hazard damage: 8 HP at round end
-- Final phase can use two hazard zones instead of one
-- Admin can manually trigger a supply drop
-- Admin can manually trigger a hazard
+For safety, the server **does not automatically resume an ACTIVE game after a restart**. It restores the saved match as `PAUSED` and records a `GAME_RECOVERED` event so the admin can review the situation and press Resume.
 
-### Admin dashboard
-
-- Live game status
-- Round and timer
-- Alive / registered counts
-- Zone population
-- Loot count per zone
-- Active hazard zones
-- Searchable 200-player table
-- Player HP / Attack / Speed
-- Item count and kills
-- Live event feed
-- Start / Pause / Resume / End Round / Reset
-- Manual supply drop / hazard controls
+The checkpoint is written atomically to avoid leaving a half-written JSON file.
 
 ## Run the backend
 
@@ -95,15 +84,9 @@ source .venv/bin/activate
 
 pip install -r requirements.txt
 
-# Optional event configuration
-# PowerShell:
+# Set a real event token before the event.
+# PowerShell example:
 # $env:ADMIN_TOKEN="your-strong-admin-token"
-# $env:ROUND_DURATION_SECONDS="15"
-# $env:FINAL_PLAYER_THRESHOLD="20"
-# $env:SUPPLY_DROP_INTERVAL="3"
-# $env:HAZARD_INTERVAL="4"
-# $env:HAZARD_DAMAGE="8"
-# $env:MAX_INVENTORY="6"
 
 uvicorn app:app --host 0.0.0.0 --port 8000
 ```
@@ -135,54 +118,30 @@ The frontend derives the backend/WebSocket host from the browser hostname unless
 
 ## Event configuration
 
-Default values:
+Defaults:
 
 ```text
 MAX_PLAYERS=200
+ADMIN_TOKEN=change-me
 ROUND_DURATION_SECONDS=15
 FINAL_PLAYER_THRESHOLD=20
 SUPPLY_DROP_INTERVAL=3
 HAZARD_INTERVAL=4
 HAZARD_DAMAGE=8
 MAX_INVENTORY=6
-ADMIN_TOKEN=change-me
+ARENA_STATE_FILE=arena_state.json
 ```
 
-The live game state is intentionally held in memory. This is appropriate for the event prototype, but the match resets if the backend process restarts.
+## Recommended live-event setup
 
-For the actual event:
-
+- Use a stable laptop/server connected to the same network as participants.
 - Set a non-default `ADMIN_TOKEN`.
-- Run the backend on a stable machine.
-- Avoid auto-reload during the live match.
-- Test from the same Wi-Fi/LAN that participants will use.
+- Do not use auto-reload during the event.
+- Keep the admin dashboard open on the organizer machine.
+- Test the game from several phones before the event.
+- Do a 200-client simulation or staged load test before the actual match.
+- If the backend restarts, open the admin dashboard, review the recovered `PAUSED` state, and explicitly resume it.
 
-## Game-state privacy
+## Notes
 
-Players receive their own full player state, inventory, and currently visible same-zone opponents. Admin receives the full game state. Public event messages are small and do not expose another player's private inventory.
-
-## Concurrency model
-
-All player actions mutate the shared game state under one `asyncio.Lock`. This is deliberately simple for an event-sized game and prevents simultaneous requests from corrupting player/zone state.
-
-The backend does not run one simulation loop per participant. It runs one lightweight round timer for the entire match.
-
-## Phase 3 test status
-
-The backend test suite contains 18 tests covering:
-
-- 13-zone setup
-- Stats and inventory
-- Movement
-- Search and loot
-- Combat and elimination
-- Items
-- Armor
-- Admin events
-- Timed round resolution
-- Pause / resume
-- 200-player registration
-
-## Next phase
-
-Phase 4 should focus on real-time/admin polish: richer admin controls, better event orchestration, reconnect UX, and more event-specific presentation. Advanced combat complexity is not necessary unless the college event rules require it.
+The project intentionally remains an event-scale prototype rather than a production MMO. The single shared lock protects state changes, one round loop manages the global timer, and WebSockets are used only for state/event synchronization.

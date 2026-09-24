@@ -1,12 +1,14 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import random
 import secrets
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 from enum import Enum
 from typing import Any
 
@@ -19,14 +21,15 @@ from pydantic import BaseModel, Field
 # Configuration
 # ---------------------------------------------------------------------------
 
-MAX_PLAYERS = int(os.getenv("MAX_PLAYERS", "200"))
+MAX_PLAYERS = int(os.getenv("MAX_PLAYERS", "250"))
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "change-me")
-ROUND_DURATION_SECONDS = max(5, int(os.getenv("ROUND_DURATION_SECONDS", "15")))
+ROUND_DURATION_SECONDS = max(5, int(os.getenv("ROUND_DURATION_SECONDS", "30")))
 FINAL_PLAYER_THRESHOLD = max(2, int(os.getenv("FINAL_PLAYER_THRESHOLD", "20")))
 SUPPLY_DROP_INTERVAL = max(1, int(os.getenv("SUPPLY_DROP_INTERVAL", "3")))
 HAZARD_INTERVAL = max(1, int(os.getenv("HAZARD_INTERVAL", "4")))
 HAZARD_DAMAGE = max(1, int(os.getenv("HAZARD_DAMAGE", "8")))
 MAX_INVENTORY = max(1, int(os.getenv("MAX_INVENTORY", "6")))
+STATE_FILE = Path(os.getenv("ARENA_STATE_FILE", "arena_state.json"))
 
 rng = random.Random()
 
@@ -148,7 +151,7 @@ class Player:
     speed: int = 10
     zone_id: str = "zone_1"
     alive: bool = True
-    connected: bool = True
+    connected: bool = False
     current_action: str | None = None
     action_taken: bool = False
     action_deadline: datetime | None = None
@@ -334,6 +337,7 @@ async def round_loop() -> None:
                 and datetime.now(timezone.utc) >= game.round_deadline
             ):
                 _resolve_round_locked()
+                _write_checkpoint_locked()
                 should_sync = True
 
         if should_sync:
@@ -343,6 +347,9 @@ async def round_loop() -> None:
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     global round_task
+    async with state_lock:
+        _restore_from_checkpoint()
+        _write_checkpoint_locked()
     round_task = asyncio.create_task(round_loop())
     yield
     if round_task:
@@ -354,7 +361,7 @@ async def lifespan(_: FastAPI):
         round_task = None
 
 
-app = FastAPI(title="Arena RPG API", version="0.3.0", lifespan=lifespan)
+app = FastAPI(title="Arena RPG API", version="0.4.0", lifespan=lifespan)
 cors_origins = [origin.strip() for origin in os.getenv("CORS_ORIGINS", "*").split(",") if origin.strip()]
 app.add_middleware(
     CORSMiddleware,
@@ -380,6 +387,13 @@ class AdminLoginRequest(BaseModel):
 class AdminActionRequest(BaseModel):
     action: str
     targetZoneId: str | None = None
+    targetPlayerId: str | None = None
+    itemType: str | None = None
+    message: str | None = Field(default=None, max_length=240)
+    reason: str | None = Field(default=None, max_length=160)
+    value: int | None = Field(default=None, ge=0, le=500)
+    attack: int | None = Field(default=None, ge=1, le=100)
+    speed: int | None = Field(default=None, ge=1, le=100)
 
 
 class PlayerActionRequest(BaseModel):
@@ -501,6 +515,9 @@ def player_state(player: Player) -> dict[str, Any]:
 
 def admin_state() -> dict[str, Any]:
     now = datetime.now(timezone.utc)
+    alive_players = [p for p in game.players.values() if p.alive]
+    acted_count = sum(1 for player in alive_players if player.action_taken)
+    online_count = sum(1 for player in game.players.values() if player.connected)
     return {
         "gameId": game.game_id,
         "status": game.status.value,
@@ -511,12 +528,162 @@ def admin_state() -> dict[str, Any]:
         "roundDeadline": game.round_deadline.isoformat() if game.round_deadline else None,
         "playerCount": len(game.players),
         "aliveCount": game.alive_count,
+        "onlineCount": online_count,
+        "actedCount": acted_count,
+        "waitingCount": max(0, game.alive_count - acted_count),
         "maxPlayers": MAX_PLAYERS,
         "winnerId": game.winner_id,
         "zones": [public_zone_dict(zone, include_counts=True) for zone in ZONES.values()],
         "players": [p.admin_dict() for p in game.players.values()],
-        "events": game.event_log[-100:],
+        "events": game.event_log[-120:],
     }
+
+
+
+def _state_dict_locked() -> dict[str, Any]:
+    return {
+        "gameId": game.game_id,
+        "status": game.status.value,
+        "phase": game.phase.value,
+        "round": game.round_number,
+        "roundDeadline": game.round_deadline.isoformat() if game.round_deadline else None,
+        "pausedRemainingSeconds": game.paused_remaining_seconds,
+        "winnerId": game.winner_id,
+        "eventLog": game.event_log[-2000:],
+        "hazardZones": sorted(game.hazard_zones),
+        "zoneItems": {
+            zone_id: [item.dict() for item in items]
+            for zone_id, items in game.zone_items.items()
+        },
+        "players": [
+            {
+                **player.admin_dict(),
+                "sessionToken": player.session_token,
+            }
+            for player in game.players.values()
+        ],
+    }
+
+
+def _write_checkpoint_locked() -> None:
+    """Write the single-game checkpoint atomically so an event restart can recover safely."""
+    STATE_FILE.parent.mkdir(parents=True, exist_ok=True)
+    temporary = STATE_FILE.with_suffix(STATE_FILE.suffix + ".tmp")
+    temporary.write_text(json.dumps(_state_dict_locked(), indent=2), encoding="utf-8")
+    os.replace(temporary, STATE_FILE)
+
+
+def _restore_from_checkpoint() -> None:
+    """Load the last checkpoint. Never auto-resume a live round after a server restart."""
+    if not STATE_FILE.exists():
+        return
+
+    try:
+        raw = json.loads(STATE_FILE.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return
+
+    game.players.clear()
+    for items in game.zone_items.values():
+        items.clear()
+    game.event_log.clear()
+    game.hazard_zones.clear()
+
+    try:
+        game.status = GameStatus(raw.get("status", GameStatus.LOBBY.value))
+        game.phase = GamePhase(raw.get("phase", GamePhase.OPENING.value))
+    except ValueError:
+        game.status = GameStatus.LOBBY
+        game.phase = GamePhase.OPENING
+
+    game.round_number = int(raw.get("round", 0) or 0)
+    game.winner_id = raw.get("winnerId")
+    game.event_log.extend(raw.get("eventLog", [])[-2000:])
+    game.hazard_zones.update(zone_id for zone_id in raw.get("hazardZones", []) if zone_id in ZONES)
+
+    for zone_id, serialized_items in raw.get("zoneItems", {}).items():
+        if zone_id not in game.zone_items:
+            continue
+        for data in serialized_items:
+            try:
+                definition = ITEM_DEFINITIONS[data["type"]]
+                game.zone_items[zone_id].append(
+                    Item(
+                        id=str(data["id"]),
+                        type=definition.type,
+                        name=definition.name,
+                        description=definition.description,
+                    )
+                )
+            except (KeyError, TypeError):
+                continue
+
+    for data in raw.get("players", []):
+        try:
+            joined_at = str(data.get("joinedAt") or datetime.now(timezone.utc).isoformat())
+            player = Player(
+                id=str(data["id"]),
+                name=str(data["name"]),
+                health=int(data.get("health", 100)),
+                max_health=int(data.get("maxHealth", 100)),
+                attack=int(data.get("attack", 10)),
+                speed=int(data.get("speed", 10)),
+                zone_id=str(data.get("zoneId", "zone_1")),
+                alive=bool(data.get("alive", True)),
+                connected=False,
+                current_action=data.get("currentAction"),
+                action_taken=bool(data.get("actionTaken", False)),
+                action_deadline=None,
+                status_effect=str(data.get("statusEffect", "NORMAL")),
+                last_result=str(data.get("lastResult", "Recovered from the previous server session.")),
+                joined_at=joined_at,
+                session_token=str(data.get("sessionToken") or secrets.token_urlsafe(24)),
+                kills=int(data.get("kills", 0)),
+            )
+            if player.zone_id not in ZONES:
+                player.zone_id = "zone_1"
+            for item_data in data.get("inventory", []):
+                item_type = item_data.get("type")
+                if item_type in ITEM_DEFINITIONS:
+                    definition = ITEM_DEFINITIONS[item_type]
+                    player.inventory.append(Item(
+                        id=str(item_data["id"]),
+                        type=definition.type,
+                        name=definition.name,
+                        description=definition.description,
+                    ))
+            game.players[player.id] = player
+        except (KeyError, TypeError, ValueError):
+            continue
+
+    saved_deadline = raw.get("roundDeadline")
+    game.round_deadline = None
+    game.paused_remaining_seconds = None
+
+    if game.status == GameStatus.ACTIVE:
+        try:
+            deadline = datetime.fromisoformat(saved_deadline) if saved_deadline else None
+            remaining = (deadline - datetime.now(timezone.utc)).total_seconds() if deadline else ROUND_DURATION_SECONDS
+        except (TypeError, ValueError):
+            remaining = ROUND_DURATION_SECONDS
+        game.paused_remaining_seconds = max(1.0, min(float(remaining), float(ROUND_DURATION_SECONDS)))
+        game.status = GameStatus.PAUSED
+        for player in game.players.values():
+            player.connected = False
+            player.action_deadline = None
+        game.add_event(
+            "The arena was recovered after a server restart and is paused for admin review.",
+            "GAME_RECOVERED",
+        )
+    elif game.status == GameStatus.PAUSED:
+        game.paused_remaining_seconds = float(raw.get("pausedRemainingSeconds") or ROUND_DURATION_SECONDS)
+        for player in game.players.values():
+            player.connected = False
+            player.action_deadline = None
+    else:
+        for player in game.players.values():
+            player.connected = False
+            player.action_deadline = None
 
 
 def assign_starting_zones_locked() -> None:
@@ -1005,6 +1172,7 @@ async def join_game(request: JoinRequest) -> dict[str, Any]:
 
         player = Player(id=next_player_id(), name=name)
         game.players[player.id] = player
+        _write_checkpoint_locked()
         event = game.add_event(f"{player.name} joined the arena ({player.id}).", "PLAYER_JOINED")
         player_snapshot = player_state(player)
         current_game = {
@@ -1046,6 +1214,7 @@ async def player_action(
             request.itemId,
         )
         snapshot = player_state(player)
+        _write_checkpoint_locked()
 
     await sync_action_result(player.id, event)
     return snapshot
@@ -1073,6 +1242,8 @@ async def admin_action(
     require_admin(x_admin_token)
     action = request.action.upper()
     reset_requested = False
+    selected_event: dict[str, Any] | None = None
+
     async with state_lock:
         if action == "START_GAME":
             if game.status != GameStatus.LOBBY:
@@ -1089,11 +1260,11 @@ async def admin_action(
             if game.status != GameStatus.ACTIVE:
                 raise HTTPException(status_code=409, detail="Game is not active")
             if game.round_deadline:
-                game.paused_remaining_seconds = max(
-                    0.0,
-                    (game.round_deadline - datetime.now(timezone.utc)).total_seconds(),
-                )
+                game.paused_remaining_seconds = max(0.0, (game.round_deadline - datetime.now(timezone.utc)).total_seconds())
             game.round_deadline = None
+            for player in game.players.values():
+                if player.alive:
+                    player.action_deadline = None
             game.status = GameStatus.PAUSED
             game.add_event("The arena has been paused by the admin.", "GAME_PAUSED")
         elif action == "RESUME_GAME":
@@ -1105,6 +1276,7 @@ async def admin_action(
                 if player.alive and not player.action_taken:
                     player.action_deadline = game.round_deadline
             game.status = GameStatus.ACTIVE
+            game.paused_remaining_seconds = None
             game.add_event("The arena has resumed.", "GAME_RESUMED")
         elif action == "END_ROUND":
             if game.status != GameStatus.ACTIVE:
@@ -1118,7 +1290,7 @@ async def admin_action(
                 raise HTTPException(status_code=400, detail="Unknown zone")
             chosen = target or rng.choice(list(OUTER_ZONE_IDS))
             game.zone_items[chosen].append(make_item(random_loot_type()))
-            game.add_event(f"The admin dropped supplies in {ZONES[chosen].name}.", "SUPPLY_DROP")
+            selected_event = game.add_event(f"The admin dropped supplies in {ZONES[chosen].name}.", "SUPPLY_DROP")
         elif action == "TRIGGER_HAZARD":
             if game.status not in {GameStatus.ACTIVE, GameStatus.PAUSED}:
                 raise HTTPException(status_code=409, detail="Hazards can only be triggered during the game")
@@ -1130,10 +1302,89 @@ async def admin_action(
             else:
                 game.hazard_zones = {rng.choice(list(OUTER_ZONE_IDS))}
             names = ", ".join(ZONES[zone_id].name for zone_id in game.hazard_zones)
-            game.add_event(
+            selected_event = game.add_event(
                 f"Admin activated an arena hazard in {names}. Players there will take {HAZARD_DAMAGE} damage at round end.",
                 "ARENA_HAZARD",
             )
+        elif action == "CLEAR_HAZARDS":
+            game.hazard_zones.clear()
+            selected_event = game.add_event("The admin cleared all active arena hazards.", "ARENA_HAZARD_CLEARED")
+        elif action == "BROADCAST_ANNOUNCEMENT":
+            message = " ".join((request.message or "").strip().split())
+            if not message:
+                raise HTTPException(status_code=400, detail="Enter an announcement message")
+            selected_event = game.add_event(f"ARENA ANNOUNCEMENT: {message}", "ANNOUNCEMENT")
+        elif action in {"ELIMINATE_PLAYER", "RESTORE_PLAYER", "MOVE_PLAYER", "SET_HEALTH", "SET_STATS", "GIVE_ITEM"}:
+            if not request.targetPlayerId:
+                raise HTTPException(status_code=400, detail="Choose a player")
+            target = game.players.get(request.targetPlayerId)
+            if not target:
+                raise HTTPException(status_code=404, detail="Player not found")
+
+            if action == "ELIMINATE_PLAYER":
+                if game.status == GameStatus.LOBBY:
+                    raise HTTPException(status_code=409, detail="The game has not started yet")
+                reason = " ".join((request.reason or "Eliminated by the admin.").strip().split())
+                selected_event = _eliminate_player_locked(target, f"{target.name} ({target.id}) was eliminated by the admin. {reason}")
+                if game.alive_count <= 1 and game.status != GameStatus.GAME_OVER:
+                    _finish_game_locked()
+            elif action == "RESTORE_PLAYER":
+                if game.status == GameStatus.GAME_OVER:
+                    raise HTTPException(status_code=409, detail="The game is already over")
+                if target.alive:
+                    raise HTTPException(status_code=409, detail="That player is already alive")
+                target.alive = True
+                target.health = max(1, min(target.max_health, request.value or 50))
+                target.status_effect = "NORMAL"
+                target.last_result = "An admin restored you to the arena."
+                target.action_taken = game.status != GameStatus.ACTIVE
+                target.current_action = None
+                target.action_deadline = None if game.status != GameStatus.ACTIVE else game.round_deadline
+                selected_event = game.add_event(f"{target.name} ({target.id}) was restored to the arena by the admin.", "PLAYER_RESTORED")
+            elif action == "MOVE_PLAYER":
+                destination = request.targetZoneId
+                if not destination or destination not in ZONES:
+                    raise HTTPException(status_code=400, detail="Choose a destination zone")
+                if target.alive:
+                    target.zone_id = destination
+                else:
+                    target.zone_id = destination
+                target.last_result = f"An admin moved you to {ZONES[destination].name}."
+                selected_event = game.add_event(f"Admin moved {target.name} ({target.id}) to {ZONES[destination].name}.", "PLAYER_MOVED_ADMIN")
+            elif action == "SET_HEALTH":
+                target.health = min(target.max_health, request.value or target.health)
+                if target.health > 0 and not target.alive and game.status != GameStatus.GAME_OVER:
+                    target.alive = True
+                    target.status_effect = "NORMAL"
+                if target.health == 0:
+                    target.alive = False
+                    target.status_effect = "ELIMINATED"
+                target.last_result = f"An admin set your health to {target.health}."
+                selected_event = game.add_event(f"Admin set {target.name} ({target.id}) health to {target.health}.", "PLAYER_HEALTH_SET")
+            elif action == "SET_STATS":
+                if request.attack is None and request.speed is None and request.value is None:
+                    raise HTTPException(status_code=400, detail="Provide at least one stat value")
+                if request.value is not None:
+                    target.health = min(target.max_health, request.value)
+                if request.attack is not None:
+                    target.attack = request.attack
+                if request.speed is not None:
+                    target.speed = request.speed
+                if target.health > 0 and not target.alive and game.status != GameStatus.GAME_OVER:
+                    target.alive = True
+                    target.status_effect = "NORMAL"
+                target.last_result = "An admin updated your arena stats."
+                selected_event = game.add_event(f"Admin updated {target.name} ({target.id}) stats.", "PLAYER_STATS_SET")
+            elif action == "GIVE_ITEM":
+                item_type = (request.itemType or "").upper()
+                if item_type not in ITEM_DEFINITIONS:
+                    raise HTTPException(status_code=400, detail="Choose a valid item type")
+                if len(target.inventory) >= MAX_INVENTORY:
+                    raise HTTPException(status_code=409, detail="That player's inventory is full")
+                item = make_item(item_type)
+                target.inventory.append(item)
+                target.last_result = f"An admin gave you a {item.name}."
+                selected_event = game.add_event(f"Admin gave {target.name} ({target.id}) a {item.name}.", "ITEM_GRANTED")
         elif action == "RESET_GAME":
             reset_requested = True
             game.status = GameStatus.LOBBY
@@ -1151,10 +1402,13 @@ async def admin_action(
         else:
             raise HTTPException(status_code=400, detail="Unsupported admin action")
 
+        _write_checkpoint_locked()
         snapshot = admin_state()
 
     if reset_requested:
         await manager.close_all_players({"type": "RESET"})
+    if selected_event and action == "BROADCAST_ANNOUNCEMENT":
+        await manager.broadcast_players({"type": "PUBLIC_EVENT", "data": selected_event})
     await sync_everyone_full()
     return snapshot
 
@@ -1192,6 +1446,7 @@ async def player_ws(websocket: WebSocket, player_id: str, token: str | None = No
             async with state_lock:
                 if player_id in game.players:
                     game.players[player_id].connected = False
+                    _write_checkpoint_locked()
                     admin_snapshot = admin_state()
             await manager.broadcast_admin({"type": "ADMIN_STATE", "data": admin_snapshot})
 

@@ -1,7 +1,7 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import { Link, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
-import { adminAction, adminLogin, adminWsUrl, getAdminState, joinGame, playerWsUrl, submitAction } from './api'
+import { adminAction, adminLogin, adminWsUrl, getAdminState, joinGame, playerWsUrl, submitAction, type AdminActionOptions } from './api'
 import type { AdminState, GameEvent, InventoryItem, Player, PlayerGameState, VisibleOpponent, Zone } from './types'
 
 const PLAYER_STORAGE_KEY = 'arena_player_session'
@@ -14,7 +14,7 @@ function Shell({ children }: { children: ReactNode }) {
     <div className="app-shell">
       <header className="topbar">
         <Link to="/" className="brand">THE ARENA</Link>
-        <nav><Link to="/admin">ARENA CONTROL</Link></nav>
+        <nav><Link to="/">Arena</Link></nav>
       </header>
       <main>{children}</main>
     </div>
@@ -29,7 +29,6 @@ function LandingPage() {
       <p className="hero-copy">A text-first survival game. Enter your name, make your choices, and survive the rounds.</p>
       <div className="button-row">
         <Link className="button button-primary" to="/join">ENTER THE ARENA</Link>
-        <Link className="button button-secondary" to="/admin">ADMIN CONTROL</Link>
       </div>
     </section>
   )
@@ -90,6 +89,7 @@ function usePlayerSocket() {
   const navigate = useNavigate()
   const [state, setState] = useState<PlayerGameState | null>(null)
   const [error, setError] = useState('')
+  const [connectionStatus, setConnectionStatus] = useState<'CONNECTING' | 'CONNECTED' | 'RECONNECTING'>('CONNECTING')
 
   useEffect(() => {
     const raw = localStorage.getItem(PLAYER_STORAGE_KEY)
@@ -112,8 +112,9 @@ function usePlayerSocket() {
 
     const connect = () => {
       if (closedByEffect) return
+      setConnectionStatus(reconnectTimer ? 'RECONNECTING' : 'CONNECTING')
       ws = new WebSocket(playerWsUrl(session.player.id, session.sessionToken))
-      ws.onopen = () => setError('')
+      ws.onopen = () => { setError(''); setConnectionStatus('CONNECTED') }
       ws.onmessage = (message) => {
         const payload = JSON.parse(message.data) as { type: string; data: PlayerGameState | GameEvent }
         if (payload.type === 'RESET') {
@@ -126,9 +127,12 @@ function usePlayerSocket() {
           setState((current) => current ? { ...current, events: [...current.events, payload.data as GameEvent].slice(-30) } : current)
         }
       }
-      ws.onerror = () => setError('Connection interrupted. Reconnecting…')
+      ws.onerror = () => { setError('Connection interrupted. Reconnecting…'); setConnectionStatus('RECONNECTING') }
       ws.onclose = () => {
-        if (!closedByEffect) reconnectTimer = window.setTimeout(connect, 1200)
+        if (!closedByEffect) {
+          setConnectionStatus('RECONNECTING')
+          reconnectTimer = window.setTimeout(connect, 1200)
+        }
       }
     }
 
@@ -140,12 +144,12 @@ function usePlayerSocket() {
     }
   }, [navigate])
 
-  return { state, error }
+  return { state, error, connectionStatus }
 }
 
 function PlayerLobby() {
   const navigate = useNavigate()
-  const { state, error } = usePlayerSocket()
+  const { state, error, connectionStatus } = usePlayerSocket()
 
   useEffect(() => {
     if (state?.status === 'ACTIVE' || state?.status === 'PAUSED' || state?.status === 'GAME_OVER') {
@@ -158,6 +162,7 @@ function PlayerLobby() {
   return (
     <section className="panel stack">
       <div>
+        <div className="connection-line"><span className={`connection-dot ${connectionStatus.toLowerCase()}`} /> {connectionStatus === 'CONNECTED' ? 'LIVE CONNECTION' : 'RECONNECTING'}</div>
         <p className="eyebrow">LOBBY</p>
         <h2>WELCOME, {state.player.name.toUpperCase()}</h2>
         <p className="muted">Your player ID is <strong>{state.player.id}</strong>. Keep this page open.</p>
@@ -260,7 +265,7 @@ function OpponentList({ opponents, disabled, onAttack }: { opponents: VisibleOpp
 }
 
 function PlayerGame() {
-  const { state, error } = usePlayerSocket()
+  const { state, error, connectionStatus } = usePlayerSocket()
   const [actionError, setActionError] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [selectedAction, setSelectedAction] = useState<string | null>(null)
@@ -303,6 +308,7 @@ function PlayerGame() {
           <Countdown deadline={state.roundDeadline} serverNow={state.serverNow} durationSeconds={state.roundDurationSeconds} paused={isPaused} />
           <div className="round-strip-right"><span>ALIVE</span><strong>{state.aliveCount}/{state.playerCount}</strong></div>
         </div>
+        {connectionStatus !== 'CONNECTED' && <div className="connection-warning"><span className="connection-dot reconnecting" /><strong>Connection unstable.</strong><span>Your arena state will resync automatically.</span></div>}
 
         {state.zoneHazard && state.player.alive && <div className="warning-panel"><strong>HAZARD ACTIVE</strong><span>This zone will deal {state.hazardDamage} damage at the end of the round.</span></div>}
 
@@ -375,6 +381,14 @@ function AdminPage() {
   const [error, setError] = useState('')
   const [search, setSearch] = useState('')
   const [eventZone, setEventZone] = useState('')
+  const [selectedPlayerId, setSelectedPlayerId] = useState('')
+  const [operatorValue, setOperatorValue] = useState('50')
+  const [operatorAttack, setOperatorAttack] = useState('10')
+  const [operatorSpeed, setOperatorSpeed] = useState('10')
+  const [operatorItem, setOperatorItem] = useState('MEDKIT')
+  const [operatorZone, setOperatorZone] = useState('')
+  const [announcement, setAnnouncement] = useState('')
+  const [adminConnection, setAdminConnection] = useState<'CONNECTING' | 'CONNECTED' | 'RECONNECTING'>('CONNECTING')
 
   async function login(event: FormEvent) {
     event.preventDefault()
@@ -409,14 +423,15 @@ function AdminPage() {
 
     const connect = () => {
       if (closed) return
+      setAdminConnection(reconnectTimer ? 'RECONNECTING' : 'CONNECTING')
       ws = new WebSocket(adminWsUrl(token))
-      ws.onopen = () => setError('')
+      ws.onopen = () => { setError(''); setAdminConnection('CONNECTED') }
       ws.onmessage = (message) => {
         const payload = JSON.parse(message.data) as { type: string; data: AdminState }
         if (payload.type === 'ADMIN_STATE') setState(payload.data)
       }
-      ws.onerror = () => setError('Admin live connection interrupted. Reconnecting…')
-      ws.onclose = () => { if (!closed) reconnectTimer = window.setTimeout(connect, 1200) }
+      ws.onerror = () => { setError('Admin live connection interrupted. Reconnecting…'); setAdminConnection('RECONNECTING') }
+      ws.onclose = () => { if (!closed) { setAdminConnection('RECONNECTING'); reconnectTimer = window.setTimeout(connect, 1200) } }
     }
 
     void load()
@@ -428,16 +443,45 @@ function AdminPage() {
     }
   }, [authenticated])
 
-  async function doAction(action: string, targetZoneId?: string) {
+  async function doAction(action: string, options: AdminActionOptions = {}) {
     const token = localStorage.getItem(ADMIN_STORAGE_KEY)
     if (!token) return
     setError('')
     try {
-      const next = await adminAction(token, action, targetZoneId) as AdminState
+      const next = await adminAction(token, action, options) as AdminState
       setState(next)
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Action failed')
     }
+  }
+
+  const selectedPlayer = state?.players.find((player) => player.id === selectedPlayerId) ?? null
+
+  useEffect(() => {
+    if (selectedPlayer) setOperatorZone(selectedPlayer.zoneId)
+  }, [selectedPlayerId, selectedPlayer?.zoneId])
+
+  async function runPlayerAction(action: string) {
+    if (!selectedPlayer) return
+    if (action === 'ELIMINATE_PLAYER' && !window.confirm(`Eliminate ${selectedPlayer.name}?`)) return
+    if (action === 'MOVE_PLAYER') {
+      const destination = operatorZone || selectedPlayer.zoneId
+      await doAction(action, { targetPlayerId: selectedPlayer.id, targetZoneId: destination })
+      return
+    }
+    if (action === 'GIVE_ITEM') {
+      await doAction(action, { targetPlayerId: selectedPlayer.id, itemType: operatorItem })
+      return
+    }
+    if (action === 'SET_HEALTH') {
+      await doAction(action, { targetPlayerId: selectedPlayer.id, value: Number(operatorValue) })
+      return
+    }
+    if (action === 'SET_STATS') {
+      await doAction(action, { targetPlayerId: selectedPlayer.id, value: Number(operatorValue), attack: Number(operatorAttack), speed: Number(operatorSpeed) })
+      return
+    }
+    await doAction(action, { targetPlayerId: selectedPlayer.id, value: Number(operatorValue) })
   }
 
   function logout() {
@@ -473,7 +517,7 @@ function AdminPage() {
     <section className="admin-layout">
       <div className="panel stack">
         <div className="game-header">
-          <div><p className="eyebrow">ARENA CONTROL</p><h2>MAIN GAME</h2></div>
+          <div><div className="connection-line"><span className={`connection-dot ${adminConnection.toLowerCase()}`} /> {adminConnection === 'CONNECTED' ? 'LIVE ADMIN CONNECTION' : 'ADMIN RECONNECTING'}</div><p className="eyebrow">ARENA CONTROL</p><h2>MAIN GAME</h2></div>
           <button className="button button-secondary button-small" onClick={logout}>LOG OUT</button>
         </div>
         <div className="admin-metrics">
@@ -481,8 +525,15 @@ function AdminPage() {
           <Stat label="PHASE" value={state.phase} />
           <Stat label="ROUND" value={String(state.round)} />
           <Stat label="ALIVE" value={String(state.aliveCount)} />
+          <Stat label="ONLINE" value={String(state.onlineCount)} />
           <Stat label="REGISTERED" value={`${state.playerCount}/${state.maxPlayers}`} />
+          <Stat label="ACTED" value={`${state.actedCount}/${state.aliveCount}`} />
+          <Stat label="WAITING" value={String(state.waitingCount)} />
         </div>
+        {(state.status === 'ACTIVE' || state.status === 'PAUSED') && <div className="round-progress">
+          <div className="round-progress-top"><span>ACTION PROGRESS</span><strong>{state.actedCount}/{state.aliveCount} alive players acted</strong></div>
+          <div className="round-progress-track"><span style={{ width: `${state.aliveCount ? (state.actedCount / state.aliveCount) * 100 : 0}%` }} /></div>
+        </div>}
         <div className="button-row wrap">
           {state.status === 'LOBBY' && <button className="button button-primary" onClick={() => void doAction('START_GAME')}>START GAME</button>}
           {state.status === 'ACTIVE' && <button className="button button-secondary" onClick={() => void doAction('PAUSE_GAME')}>PAUSE</button>}
@@ -505,11 +556,48 @@ function AdminPage() {
               <option value="">Random zone</option>
               {state.zones.filter((zone) => zone.id !== 'cornucopia').map((zone) => <option key={zone.id} value={zone.id}>{zone.name}</option>)}
             </select>
-            <button className="button button-secondary" onClick={() => void doAction('SPAWN_SUPPLY_DROP', eventZone || undefined)}>DROP SUPPLY</button>
-            <button className="button button-danger" onClick={() => void doAction('TRIGGER_HAZARD', eventZone || undefined)}>TRIGGER HAZARD</button>
+            <button className="button button-secondary" onClick={() => void doAction('SPAWN_SUPPLY_DROP', { targetZoneId: eventZone || undefined })}>DROP SUPPLY</button>
+            <button className="button button-danger" onClick={() => void doAction('TRIGGER_HAZARD', { targetZoneId: eventZone || undefined })}>TRIGGER HAZARD</button>
+          </div>
+          <div className="event-control-row">
+            <input value={announcement} onChange={(e) => setAnnouncement(e.target.value)} placeholder="Announcement visible to every player" maxLength={240} />
+            <button className="button button-primary" disabled={!announcement.trim()} onClick={() => { void doAction('BROADCAST_ANNOUNCEMENT', { message: announcement.trim() }); setAnnouncement('') }}>BROADCAST</button>
+            <button className="button button-secondary" onClick={() => void doAction('CLEAR_HAZARDS')}>CLEAR HAZARDS</button>
           </div>
         </div>
       )}
+
+      <div className="panel operator-panel">
+        <div>
+          <div className="section-heading">PLAYER OPERATOR TOOLS</div>
+          <p className="muted">Select a participant to correct an event mistake or administer a manual arena intervention.</p>
+        </div>
+        <div className="operator-grid">
+          <div className="operator-selected">
+            <label>SELECTED PLAYER</label>
+            <select value={selectedPlayerId} onChange={(e) => setSelectedPlayerId(e.target.value)}>
+              <option value="">Choose a player</option>
+              {state.players.map((player) => <option key={player.id} value={player.id}>{player.id} — {player.name}</option>)}
+            </select>
+            {selectedPlayer && <div className="selected-player-summary"><strong>{selectedPlayer.name}</strong><span>{selectedPlayer.id} · {selectedPlayer.zoneName} · {selectedPlayer.health}/{selectedPlayer.maxHealth} HP</span></div>}
+          </div>
+          <div className="operator-values">
+            <label>HEALTH</label><input type="number" min="0" max="500" value={operatorValue} onChange={(e) => setOperatorValue(e.target.value)} />
+            <label>ATTACK</label><input type="number" min="1" max="100" value={operatorAttack} onChange={(e) => setOperatorAttack(e.target.value)} />
+            <label>SPEED</label><input type="number" min="1" max="100" value={operatorSpeed} onChange={(e) => setOperatorSpeed(e.target.value)} />
+            <label>ITEM</label><select value={operatorItem} onChange={(e) => setOperatorItem(e.target.value)}>{['MEDKIT','FOOD','WEAPON','ARMOR','SPEED_BOOST'].map((item) => <option key={item}>{item}</option>)}</select>
+            <label>DESTINATION</label><select value={operatorZone || selectedPlayer?.zoneId || ''} onChange={(e) => setOperatorZone(e.target.value)}>{state.zones.map((zone) => <option key={zone.id} value={zone.id}>{zone.name}</option>)}</select>
+          </div>
+          <div className="button-row wrap operator-actions">
+            <button className="button button-danger" disabled={!selectedPlayer} onClick={() => void runPlayerAction('ELIMINATE_PLAYER')}>ELIMINATE</button>
+            <button className="button button-secondary" disabled={!selectedPlayer} onClick={() => void runPlayerAction('RESTORE_PLAYER')}>RESTORE</button>
+            <button className="button button-secondary" disabled={!selectedPlayer} onClick={() => void runPlayerAction('SET_HEALTH')}>SET HP</button>
+            <button className="button button-secondary" disabled={!selectedPlayer} onClick={() => void runPlayerAction('SET_STATS')}>SET STATS</button>
+            <button className="button button-secondary" disabled={!selectedPlayer} onClick={() => void runPlayerAction('MOVE_PLAYER')}>MOVE PLAYER</button>
+            <button className="button button-secondary" disabled={!selectedPlayer} onClick={() => void runPlayerAction('GIVE_ITEM')}>GIVE ITEM</button>
+          </div>
+        </div>
+      </div>
 
       <div className="zone-dashboard panel">
         <div className="section-heading">ARENA ZONES</div>
@@ -524,7 +612,7 @@ function AdminPage() {
           <table>
             <thead><tr><th>ID</th><th>Name</th><th>Zone</th><th>HP</th><th>ATK</th><th>SPD</th><th>Items</th><th>Kills</th><th>Action</th><th>Status</th><th>Connection</th></tr></thead>
             <tbody>{filteredPlayers.map((player) => (
-              <tr key={player.id}>
+              <tr key={player.id} className={selectedPlayerId === player.id ? 'selected-row' : ''} onClick={() => setSelectedPlayerId(player.id)}>
                 <td>{player.id}</td><td>{player.name}</td><td>{player.zoneName}</td><td>{player.health}</td><td>{player.attack}</td><td>{player.speed}</td>
                 <td>{player.inventory.length}</td><td>{player.kills}</td>
                 <td>{player.currentAction ?? (player.actionTaken ? 'DONE' : 'WAITING')}</td>

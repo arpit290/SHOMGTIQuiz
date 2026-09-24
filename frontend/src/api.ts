@@ -67,14 +67,25 @@ export async function adminLogin(token: string) {
   return parseResponse(response)
 }
 
-export async function adminAction(token: string, action: string, targetZoneId?: string) {
+export type AdminActionOptions = {
+  targetZoneId?: string
+  targetPlayerId?: string
+  itemType?: string
+  message?: string
+  reason?: string
+  value?: number
+  attack?: number
+  speed?: number
+}
+
+export async function adminAction(token: string, action: string, options: AdminActionOptions = {}) {
   const response = await fetch(`${API_BASE}/api/admin/action`, {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'X-Admin-Token': token,
     },
-    body: JSON.stringify({ action, targetZoneId }),
+    body: JSON.stringify({ action, ...options }),
   })
   return parseResponse(response)
 }

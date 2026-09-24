@@ -87,6 +87,9 @@ export type AdminState = {
   roundDeadline: string | null
   playerCount: number
   aliveCount: number
+  onlineCount: number
+  actedCount: number
+  waitingCount: number
   maxPlayers: number
   winnerId: string | null
   zones: Zone[]

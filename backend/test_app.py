@@ -361,3 +361,107 @@ async def _round_resolution_smoke_test() -> None:
 
 def test_background_round_resolver_logic() -> None:
     asyncio.run(_round_resolution_smoke_test())
+
+
+def test_admin_operator_tools_and_announcement() -> None:
+    reset_state()
+    joins, _ = start_small_game(["Arjun", "Rohan", "Priya"])
+    target_id = joins[0]["player"]["id"]
+
+    move = client.post(
+        "/api/admin/action",
+        headers=admin_header(),
+        json={"action": "MOVE_PLAYER", "targetPlayerId": target_id, "targetZoneId": "cornucopia"},
+    )
+    assert move.status_code == 200
+    assert app.game.players[target_id].zone_id == "cornucopia"
+
+    give = client.post(
+        "/api/admin/action",
+        headers=admin_header(),
+        json={"action": "GIVE_ITEM", "targetPlayerId": target_id, "itemType": "WEAPON"},
+    )
+    assert give.status_code == 200
+    assert app.game.players[target_id].inventory[-1].type == "WEAPON"
+
+    stats = client.post(
+        "/api/admin/action",
+        headers=admin_header(),
+        json={"action": "SET_STATS", "targetPlayerId": target_id, "value": 77, "attack": 25, "speed": 19},
+    )
+    assert stats.status_code == 200
+    assert app.game.players[target_id].health == 77
+    assert app.game.players[target_id].attack == 25
+    assert app.game.players[target_id].speed == 19
+
+    announcement = client.post(
+        "/api/admin/action",
+        headers=admin_header(),
+        json={"action": "BROADCAST_ANNOUNCEMENT", "message": "The arena is watching."},
+    )
+    assert announcement.status_code == 200
+    assert any("The arena is watching." in event["message"] for event in app.game.event_log)
+    reset_state()
+
+
+def test_admin_can_eliminate_and_restore_player() -> None:
+    reset_state()
+    joins, _ = start_small_game(["Arjun", "Rohan", "Priya"])
+    target_id = joins[0]["player"]["id"]
+
+    eliminated = client.post(
+        "/api/admin/action",
+        headers=admin_header(),
+        json={"action": "ELIMINATE_PLAYER", "targetPlayerId": target_id, "reason": "Event correction"},
+    )
+    assert eliminated.status_code == 200
+    assert app.game.players[target_id].alive is False
+
+    restored = client.post(
+        "/api/admin/action",
+        headers=admin_header(),
+        json={"action": "RESTORE_PLAYER", "targetPlayerId": target_id, "value": 55},
+    )
+    assert restored.status_code == 200
+    assert app.game.players[target_id].alive is True
+    assert app.game.players[target_id].health == 55
+    reset_state()
+
+
+def test_admin_state_reports_online_acted_and_waiting_counts() -> None:
+    reset_state()
+    joins, _ = start_small_game(["Arjun", "Rohan", "Priya"])
+    first = app.game.players[joins[0]["player"]["id"]]
+    first.action_taken = True
+    state = client.get("/api/admin/state", headers=admin_header()).json()
+    assert state["aliveCount"] == 3
+    assert state["actedCount"] == 1
+    assert state["waitingCount"] == 2
+    assert state["onlineCount"] == 0
+    reset_state()
+
+
+def test_checkpoint_recovers_active_game_as_paused(tmp_path) -> None:
+    reset_state()
+    start_small_game(["Arjun", "Rohan"])
+    for player in app.game.players.values():
+        player.connected = False
+    app.game.round_deadline = datetime.now(timezone.utc) + timedelta(seconds=8)
+
+    original_state_file = app.STATE_FILE
+    app.STATE_FILE = tmp_path / "arena_state.json"
+    try:
+        app._write_checkpoint_locked()
+        app.game.players.clear()
+        app.game.round_deadline = None
+        app.game.status = app.GameStatus.LOBBY
+        app.game.phase = app.GamePhase.OPENING
+        app._restore_from_checkpoint()
+        assert app.game.status == app.GameStatus.PAUSED
+        assert len(app.game.players) == 2
+        assert app.game.paused_remaining_seconds is not None
+        assert all(player.action_deadline is None for player in app.game.players.values())
+        assert any(event["type"] == "GAME_RECOVERED" for event in app.game.event_log)
+    finally:
+        app.STATE_FILE = original_state_file
+        reset_state()
