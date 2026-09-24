@@ -108,11 +108,14 @@ npm install
 npm run dev -- --host 0.0.0.0
 ```
 
-For a college LAN, participants can open:
+## Run the tunnel
 
-```text
-http://YOUR-LAN-IP:5173
+```bash
+cloudflared.exe tunnel --url http://127.0.0.1:5173 --protocol http2
 ```
+
+For a college LAN, participants can open the link that the above thing gives us.
+
 
 The frontend derives the backend/WebSocket host from the browser hostname unless `VITE_API_BASE` / `VITE_WS_BASE` are explicitly set.
 

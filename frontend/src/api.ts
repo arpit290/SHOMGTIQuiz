@@ -1,12 +1,11 @@
-const API_PORT = 8000
-
 function hostBase() {
-  const hostname = window.location.hostname || 'localhost'
-  return `${window.location.protocol}//${hostname}:${API_PORT}`
+  // In development, Vite proxies /api and /ws to FastAPI.
+  // In production, FastAPI can serve the React build from the same origin.
+  return window.location.origin
 }
 
-const API_BASE = import.meta.env.VITE_API_BASE || hostBase()
-const WS_BASE = import.meta.env.VITE_WS_BASE || API_BASE.replace(/^http/, 'ws')
+const API_BASE = (import.meta.env.VITE_API_BASE || hostBase()).replace(/\/$/, '')
+const WS_BASE = (import.meta.env.VITE_WS_BASE || API_BASE.replace(/^http/, 'ws')).replace(/\/$/, '')
 
 async function parseResponse(response: Response) {
   const payload = await response.json()
