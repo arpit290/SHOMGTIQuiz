@@ -1,0 +1,157 @@
+{
+  "gameId": "main_game",
+  "status": "ACTIVE",
+  "phase": "OPENING",
+  "round": 1,
+  "roundDeadline": "2026-09-26T05:01:33.901033+00:00",
+  "pausedRemainingSeconds": null,
+  "winnerId": null,
+  "eventLog": [
+    {
+      "id": "29acec698638",
+      "timestamp": "2026-09-26T05:01:03.897338+00:00",
+      "type": "PLAYER_JOINED",
+      "message": "Arjun joined the arena (P-001)."
+    },
+    {
+      "id": "7c2188cb296a",
+      "timestamp": "2026-09-26T05:01:03.899399+00:00",
+      "type": "PLAYER_JOINED",
+      "message": "Rohan joined the arena (P-002)."
+    },
+    {
+      "id": "efa4b65dbd8c",
+      "timestamp": "2026-09-26T05:01:03.901006+00:00",
+      "type": "SUPPLY_DROP",
+      "message": "The Cornucopia has been stocked with supplies."
+    },
+    {
+      "id": "4c67a58d1291",
+      "timestamp": "2026-09-26T05:01:03.901026+00:00",
+      "type": "GAME_STARTED",
+      "message": "The arena has begun."
+    },
+    {
+      "id": "1cc2d2f087fb",
+      "timestamp": "2026-09-26T05:01:03.901047+00:00",
+      "type": "ROUND_STARTED",
+      "message": "Round 1 has begun. Players have 30 seconds to act."
+    }
+  ],
+  "hazardZones": [],
+  "battles": [],
+  "zoneItems": {
+    "zone_1": [],
+    "zone_2": [],
+    "zone_3": [],
+    "zone_4": [],
+    "zone_5": [],
+    "zone_6": [],
+    "zone_7": [],
+    "zone_8": [],
+    "zone_9": [],
+    "zone_10": [],
+    "zone_11": [],
+    "zone_12": [],
+    "cornucopia": [
+      {
+        "id": "I-4f2869dd22",
+        "type": "MEDKIT",
+        "name": "Medkit",
+        "description": "Restore 30 health."
+      },
+      {
+        "id": "I-5fa21fce19",
+        "type": "FOOD",
+        "name": "Food",
+        "description": "Restore 12 health."
+      },
+      {
+        "id": "I-b69a186b35",
+        "type": "ARMOR",
+        "name": "Armor",
+        "description": "Use to become Armored until your next round; the next hit against you is reduced by 8 damage."
+      },
+      {
+        "id": "I-428d808f0d",
+        "type": "MEDKIT",
+        "name": "Medkit",
+        "description": "Restore 30 health."
+      },
+      {
+        "id": "I-bddc6a4be7",
+        "type": "FOOD",
+        "name": "Food",
+        "description": "Restore 12 health."
+      },
+      {
+        "id": "I-22ddcc321d",
+        "type": "MEDKIT",
+        "name": "Medkit",
+        "description": "Restore 30 health."
+      },
+      {
+        "id": "I-08caee902f",
+        "type": "FOOD",
+        "name": "Food",
+        "description": "Restore 12 health."
+      },
+      {
+        "id": "I-75f61b117c",
+        "type": "SPEED_BOOST",
+        "name": "Speed Boost",
+        "description": "Use once to permanently gain +3 Speed."
+      }
+    ]
+  },
+  "players": [
+    {
+      "id": "P-001",
+      "name": "Arjun",
+      "health": 100,
+      "maxHealth": 100,
+      "attack": 10,
+      "speed": 10,
+      "zoneId": "zone_1",
+      "zoneName": "Zone 1",
+      "alive": true,
+      "connected": false,
+      "currentAction": null,
+      "actionTaken": false,
+      "actionDeadline": "2026-09-26T05:01:33.901033+00:00",
+      "statusEffect": "NORMAL",
+      "lastResult": "Round 1 has begun. Choose your action.",
+      "kills": 0,
+      "inventory": [],
+      "battleId": null,
+      "battleOpponentId": null,
+      "battleAction": null,
+      "joinedAt": "2026-09-26T05:01:03.897132+00:00",
+      "sessionToken": "hIjGIlt1d8UjRSN3oDPw0fUI7poGRJ9k"
+    },
+    {
+      "id": "P-002",
+      "name": "Rohan",
+      "health": 100,
+      "maxHealth": 100,
+      "attack": 10,
+      "speed": 10,
+      "zoneId": "zone_2",
+      "zoneName": "Zone 2",
+      "alive": true,
+      "connected": false,
+      "currentAction": null,
+      "actionTaken": false,
+      "actionDeadline": "2026-09-26T05:01:33.901033+00:00",
+      "statusEffect": "NORMAL",
+      "lastResult": "Round 1 has begun. Choose your action.",
+      "kills": 0,
+      "inventory": [],
+      "battleId": null,
+      "battleOpponentId": null,
+      "battleAction": null,
+      "joinedAt": "2026-09-26T05:01:03.899176+00:00",
+      "sessionToken": "IBV7YNWECN81M6cCXd5MTmn9gUdLVL_0"
+    }
+  ]
+}

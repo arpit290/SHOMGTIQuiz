@@ -21,9 +21,11 @@ Phase 4 focuses on making the existing game practical to operate live: stronger 
 - Global timed rounds (15 seconds by default)
 - Backend-authoritative deadlines
 - One action per player per round
+- Cornucopia-only item pickup with a dedicated GRAB ITEM action
 - Timeout and late-submission elimination
 - Opening / Main / Final / Game Over phases
-- MOVE, SEARCH, REST, HIDE, SCOUT, ATTACK, USE_ITEM, WAIT
+- MOVE, REST, SCOUT, ATTACK, USE_ITEM, WAIT, and Cornucopia-only GRAB ITEM
+- Engaged two-player battles with ATTACK / DEFEND / RUN turns
 - Combat, inventory, loot, supply drops, and arena hazards
 
 ### Admin dashboard improvements
@@ -43,6 +45,7 @@ Phase 4 focuses on making the existing game practical to operate live: stronger 
   - Clear hazards
   - Broadcast an announcement to all players
 - Connection indicator for the admin WebSocket
+- Live `/spectate` view protected by the admin token
 
 ### Reconnection
 - Player WebSocket reconnects automatically after a disconnect
@@ -125,6 +128,7 @@ Defaults:
 MAX_PLAYERS=200
 ADMIN_TOKEN=change-me
 ROUND_DURATION_SECONDS=15
+BATTLE_TURN_DURATION_SECONDS=15
 FINAL_PLAYER_THRESHOLD=20
 SUPPLY_DROP_INTERVAL=3
 HAZARD_INTERVAL=4

@@ -24,6 +24,7 @@ from pydantic import BaseModel, Field
 MAX_PLAYERS = int(os.getenv("MAX_PLAYERS", "250"))
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "change-me")
 ROUND_DURATION_SECONDS = max(5, int(os.getenv("ROUND_DURATION_SECONDS", "30")))
+BATTLE_TURN_DURATION_SECONDS = max(5, int(os.getenv("BATTLE_TURN_DURATION_SECONDS", "15")))
 FINAL_PLAYER_THRESHOLD = max(2, int(os.getenv("FINAL_PLAYER_THRESHOLD", "20")))
 SUPPLY_DROP_INTERVAL = max(1, int(os.getenv("SUPPLY_DROP_INTERVAL", "3")))
 HAZARD_INTERVAL = max(1, int(os.getenv("HAZARD_INTERVAL", "4")))
@@ -81,6 +82,21 @@ class Item:
             "name": self.name,
             "description": self.description,
         }
+
+
+@dataclass
+class Battle:
+    id: str
+    player_a_id: str
+    player_b_id: str
+    started_round: int
+    turn_number: int = 1
+    actions: dict[str, str] = field(default_factory=dict)
+    deadline: datetime | None = None
+    paused_remaining_seconds: float | None = None
+
+    def participant_ids(self) -> tuple[str, str]:
+        return self.player_a_id, self.player_b_id
 
 
 ITEM_DEFINITIONS: dict[str, ItemDefinition] = {
@@ -161,6 +177,9 @@ class Player:
     session_token: str = field(default_factory=lambda: secrets.token_urlsafe(24))
     kills: int = 0
     inventory: list[Item] = field(default_factory=list)
+    battle_id: str | None = None
+    battle_opponent_id: str | None = None
+    battle_action: str | None = None
 
     def inventory_dict(self) -> list[dict[str, str]]:
         return [item.dict() for item in self.inventory]
@@ -185,6 +204,9 @@ class Player:
             "lastResult": self.last_result,
             "kills": self.kills,
             "inventory": self.inventory_dict(),
+            "battleId": self.battle_id,
+            "battleOpponentId": self.battle_opponent_id,
+            "battleAction": self.battle_action,
         }
 
     def admin_dict(self) -> dict[str, Any]:
@@ -207,6 +229,7 @@ class GameState:
     event_log: list[dict[str, Any]] = field(default_factory=list)
     zone_items: dict[str, list[Item]] = field(default_factory=lambda: {zone_id: [] for zone_id in ZONES})
     hazard_zones: set[str] = field(default_factory=set)
+    battles: dict[str, Battle] = field(default_factory=dict)
 
     @property
     def alive_count(self) -> int:
@@ -247,6 +270,7 @@ class ConnectionManager:
     def __init__(self) -> None:
         self.player_connections: dict[str, set[WebSocket]] = {}
         self.admin_connections: set[WebSocket] = set()
+        self.spectator_connections: set[WebSocket] = set()
 
     async def connect_player(self, player_id: str, websocket: WebSocket) -> None:
         await websocket.accept()
@@ -268,6 +292,13 @@ class ConnectionManager:
 
     def disconnect_admin(self, websocket: WebSocket) -> None:
         self.admin_connections.discard(websocket)
+
+    async def connect_spectator(self, websocket: WebSocket) -> None:
+        await websocket.accept()
+        self.spectator_connections.add(websocket)
+
+    def disconnect_spectator(self, websocket: WebSocket) -> None:
+        self.spectator_connections.discard(websocket)
 
     async def send_player(self, player_id: str, payload: dict[str, Any]) -> None:
         dead: list[WebSocket] = []
@@ -317,6 +348,16 @@ class ConnectionManager:
         for ws in dead:
             self.disconnect_admin(ws)
 
+    async def broadcast_spectators(self, payload: dict[str, Any]) -> None:
+        dead: list[WebSocket] = []
+        for ws in list(self.spectator_connections):
+            try:
+                await ws.send_json(payload)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            self.disconnect_spectator(ws)
+
 
 manager = ConnectionManager()
 
@@ -331,14 +372,17 @@ async def round_loop() -> None:
         await asyncio.sleep(0.20)
         should_sync = False
         async with state_lock:
-            if (
-                game.status == GameStatus.ACTIVE
-                and game.round_deadline is not None
-                and datetime.now(timezone.utc) >= game.round_deadline
-            ):
-                _resolve_round_locked()
-                _write_checkpoint_locked()
-                should_sync = True
+            if game.status == GameStatus.ACTIVE:
+                battle_expired = _resolve_expired_battles_locked()
+                round_expired = (
+                    game.round_deadline is not None
+                    and datetime.now(timezone.utc) >= game.round_deadline
+                )
+                if battle_expired or round_expired:
+                    if round_expired and game.status == GameStatus.ACTIVE:
+                        _resolve_round_locked()
+                    _write_checkpoint_locked()
+                    should_sync = True
 
         if should_sync:
             await sync_everyone_full()
@@ -408,7 +452,8 @@ class PlayerActionRequest(BaseModel):
 # Game engine helpers
 # ---------------------------------------------------------------------------
 
-ACTION_SET = {"MOVE", "SEARCH", "REST", "HIDE", "SCOUT", "ATTACK", "USE_ITEM", "WAIT"}
+ACTION_SET = {"MOVE", "REST", "SCOUT", "ATTACK", "USE_ITEM", "WAIT", "GRAB_ITEM"}
+BATTLE_ACTION_SET = {"BATTLE_ATTACK", "BATTLE_DEFEND", "BATTLE_RUN"}
 
 
 def clean_name(name: str) -> str:
@@ -448,6 +493,35 @@ def nearby_opponents(player: Player) -> list[Player]:
     ]
 
 
+def get_battle_locked(player: Player) -> Battle | None:
+    if not player.battle_id:
+        return None
+    battle = game.battles.get(player.battle_id)
+    if not battle:
+        player.battle_id = None
+        player.battle_opponent_id = None
+        player.battle_action = None
+    return battle
+
+
+def battle_dict(battle: Battle | None, *, viewer_id: str | None = None) -> dict[str, Any] | None:
+    if battle is None:
+        return None
+    payload = {
+        "id": battle.id,
+        "playerAId": battle.player_a_id,
+        "playerBId": battle.player_b_id,
+        "turn": battle.turn_number,
+        "deadline": battle.deadline.isoformat() if battle.deadline else None,
+        "startedRound": battle.started_round,
+        "yourAction": battle.actions.get(viewer_id) if viewer_id else None,
+        "opponentActionSubmitted": bool(viewer_id and any(pid != viewer_id for pid in battle.actions)),
+    }
+    if viewer_id is None:
+        payload["actions"] = dict(battle.actions)
+    return payload
+
+
 def visible_opponent_dict(player: Player) -> list[dict[str, Any]]:
     return [
         {
@@ -462,14 +536,25 @@ def visible_opponent_dict(player: Player) -> list[dict[str, Any]]:
 
 
 def available_actions(player: Player) -> list[str]:
-    if not player.alive or game.status != GameStatus.ACTIVE or player.action_taken:
+    if not player.alive or game.status != GameStatus.ACTIVE:
         return []
 
-    actions = {"MOVE", "SEARCH", "REST", "HIDE", "SCOUT", "WAIT"}
+    battle = get_battle_locked(player)
+    if battle:
+        if player.battle_action:
+            return []
+        return sorted(BATTLE_ACTION_SET)
+
+    if player.action_taken:
+        return []
+
+    actions = {"MOVE", "REST", "SCOUT", "WAIT"}
     if nearby_opponents(player):
         actions.add("ATTACK")
     if player.inventory:
         actions.add("USE_ITEM")
+    if player.zone_id == "cornucopia" and game.zone_items["cornucopia"] and len(player.inventory) < MAX_INVENTORY:
+        actions.add("GRAB_ITEM")
     return sorted(actions)
 
 
@@ -489,12 +574,14 @@ def public_zone_dict(zone: ZoneDefinition, *, include_counts: bool = False) -> d
 
 def player_state(player: Player) -> dict[str, Any]:
     now = datetime.now(timezone.utc)
+    battle = get_battle_locked(player)
     return {
         "gameId": game.game_id,
         "status": game.status.value,
         "phase": game.phase.value,
         "round": game.round_number,
         "roundDurationSeconds": ROUND_DURATION_SECONDS,
+        "battleTurnDurationSeconds": BATTLE_TURN_DURATION_SECONDS,
         "serverNow": now.isoformat(),
         "roundDeadline": game.round_deadline.isoformat() if game.round_deadline else None,
         "player": player.public_dict(),
@@ -510,6 +597,7 @@ def player_state(player: Player) -> dict[str, Any]:
         "maxPlayers": MAX_PLAYERS,
         "winnerId": game.winner_id,
         "events": game.event_log[-30:],
+        "battle": battle_dict(battle, viewer_id=player.id),
     }
 
 
@@ -536,6 +624,35 @@ def admin_state() -> dict[str, Any]:
         "zones": [public_zone_dict(zone, include_counts=True) for zone in ZONES.values()],
         "players": [p.admin_dict() for p in game.players.values()],
         "events": game.event_log[-120:],
+        "battles": [battle_dict(battle) for battle in game.battles.values()],
+    }
+
+
+def spectate_state() -> dict[str, Any]:
+    now = datetime.now(timezone.utc)
+    players = []
+    for player in game.players.values():
+        players.append({
+            **player.public_dict(),
+            "battle": battle_dict(get_battle_locked(player)),
+        })
+    return {
+        "gameId": game.game_id,
+        "status": game.status.value,
+        "phase": game.phase.value,
+        "round": game.round_number,
+        "roundDurationSeconds": ROUND_DURATION_SECONDS,
+        "battleTurnDurationSeconds": BATTLE_TURN_DURATION_SECONDS,
+        "serverNow": now.isoformat(),
+        "roundDeadline": game.round_deadline.isoformat() if game.round_deadline else None,
+        "playerCount": len(game.players),
+        "aliveCount": game.alive_count,
+        "maxPlayers": MAX_PLAYERS,
+        "winnerId": game.winner_id,
+        "zones": [public_zone_dict(zone, include_counts=True) for zone in ZONES.values()],
+        "players": players,
+        "battles": [battle_dict(battle) for battle in game.battles.values()],
+        "events": game.event_log[-160:],
     }
 
 
@@ -551,6 +668,19 @@ def _state_dict_locked() -> dict[str, Any]:
         "winnerId": game.winner_id,
         "eventLog": game.event_log[-2000:],
         "hazardZones": sorted(game.hazard_zones),
+        "battles": [
+            {
+                "id": battle.id,
+                "playerAId": battle.player_a_id,
+                "playerBId": battle.player_b_id,
+                "startedRound": battle.started_round,
+                "turnNumber": battle.turn_number,
+                "actions": dict(battle.actions),
+                "deadline": battle.deadline.isoformat() if battle.deadline else None,
+                "pausedRemainingSeconds": battle.paused_remaining_seconds,
+            }
+            for battle in game.battles.values()
+        ],
         "zoneItems": {
             zone_id: [item.dict() for item in items]
             for zone_id, items in game.zone_items.items()
@@ -588,6 +718,7 @@ def _restore_from_checkpoint() -> None:
         items.clear()
     game.event_log.clear()
     game.hazard_zones.clear()
+    game.battles.clear()
 
     try:
         game.status = GameStatus(raw.get("status", GameStatus.LOBBY.value))
@@ -639,6 +770,9 @@ def _restore_from_checkpoint() -> None:
                 joined_at=joined_at,
                 session_token=str(data.get("sessionToken") or secrets.token_urlsafe(24)),
                 kills=int(data.get("kills", 0)),
+                battle_id=data.get("battleId"),
+                battle_opponent_id=data.get("battleOpponentId"),
+                battle_action=data.get("battleAction"),
             )
             if player.zone_id not in ZONES:
                 player.zone_id = "zone_1"
@@ -655,6 +789,29 @@ def _restore_from_checkpoint() -> None:
             game.players[player.id] = player
         except (KeyError, TypeError, ValueError):
             continue
+
+    for data in raw.get("battles", []):
+        try:
+            battle = Battle(
+                id=str(data["id"]),
+                player_a_id=str(data["playerAId"]),
+                player_b_id=str(data["playerBId"]),
+                started_round=int(data.get("startedRound", game.round_number or 1)),
+                turn_number=int(data.get("turnNumber", 1)),
+                actions={str(pid): str(action) for pid, action in (data.get("actions") or {}).items()},
+                deadline=None,
+                paused_remaining_seconds=(float(data["pausedRemainingSeconds"]) if data.get("pausedRemainingSeconds") is not None else None),
+            )
+            if battle.player_a_id in game.players and battle.player_b_id in game.players:
+                game.battles[battle.id] = battle
+        except (KeyError, TypeError, ValueError):
+            continue
+
+    for player in game.players.values():
+        if player.battle_id not in game.battles:
+            player.battle_id = None
+            player.battle_opponent_id = None
+            player.battle_action = None
 
     saved_deadline = raw.get("roundDeadline")
     game.round_deadline = None
@@ -675,18 +832,24 @@ def _restore_from_checkpoint() -> None:
             "The arena was recovered after a server restart and is paused for admin review.",
             "GAME_RECOVERED",
         )
+        for battle in game.battles.values():
+            battle.deadline = None
     elif game.status == GameStatus.PAUSED:
         game.paused_remaining_seconds = float(raw.get("pausedRemainingSeconds") or ROUND_DURATION_SECONDS)
         for player in game.players.values():
             player.connected = False
             player.action_deadline = None
+        for battle in game.battles.values():
+            battle.deadline = None
     else:
         for player in game.players.values():
             player.connected = False
             player.action_deadline = None
+        game.battles.clear()
 
 
 def assign_starting_zones_locked() -> None:
+    game.battles.clear()
     for index, player in enumerate(game.players.values()):
         player.zone_id = OUTER_ZONE_IDS[index % len(OUTER_ZONE_IDS)]
         player.health = player.max_health
@@ -700,6 +863,9 @@ def assign_starting_zones_locked() -> None:
         player.last_result = f"You begin in {ZONES[player.zone_id].name}."
         player.kills = 0
         player.inventory.clear()
+        player.battle_id = None
+        player.battle_opponent_id = None
+        player.battle_action = None
 
     for zone_id in game.zone_items:
         game.zone_items[zone_id].clear()
@@ -760,14 +926,20 @@ def _begin_round_locked() -> None:
 
     for player in game.players.values():
         if player.alive:
+            if get_battle_locked(player):
+                player.current_action = "BATTLE"
+                player.action_taken = True
+                player.action_deadline = game.battles[player.battle_id].deadline if player.battle_id in game.battles else game.round_deadline
+                if player.status_effect == "ARMORED":
+                    player.status_effect = "NORMAL"
+                player.last_result = f"Battle with {game.players[player.battle_opponent_id].name} continues. Choose a combat move." if player.battle_opponent_id in game.players else "Your battle continues."
+                continue
             player.current_action = None
             player.action_taken = False
             player.action_deadline = game.round_deadline
             if player.status_effect == "ARMORED":
                 # Armor lasts through the round in which it was used; it is cleared
                 # at the next round start if it survived unused.
-                player.status_effect = "NORMAL"
-            elif player.status_effect == "HIDDEN":
                 player.status_effect = "NORMAL"
             player.last_result = f"Round {game.round_number} has begun. Choose your action."
         else:
@@ -786,6 +958,29 @@ def _begin_round_locked() -> None:
     )
 
 
+def _clear_battle_players_locked(battle: Battle, *, ended_action_round: bool) -> None:
+    for player_id in battle.participant_ids():
+        player = game.players.get(player_id)
+        if not player:
+            continue
+        player.battle_id = None
+        player.battle_opponent_id = None
+        player.battle_action = None
+        player.current_action = None
+        player.action_deadline = game.round_deadline if game.status == GameStatus.ACTIVE else None
+        player.action_taken = ended_action_round
+
+
+def _end_battle_locked(battle_id: str, *, reason: str | None = None) -> None:
+    battle = game.battles.pop(battle_id, None)
+    if not battle:
+        return
+    ended_action_round = game.round_number == battle.started_round
+    _clear_battle_players_locked(battle, ended_action_round=ended_action_round)
+    if reason:
+        game.add_event(reason, "BATTLE_ENDED")
+
+
 def _finish_game_locked() -> None:
     alive_players = [p for p in game.players.values() if p.alive]
     if len(alive_players) == 1:
@@ -799,10 +994,15 @@ def _finish_game_locked() -> None:
     game.phase = GamePhase.GAME_OVER
     game.round_deadline = None
     game.hazard_zones.clear()
+    game.battles.clear()
 
     for player in game.players.values():
         player.action_deadline = None
         player.action_taken = True
+        player.battle_id = None
+        player.battle_opponent_id = None
+        player.battle_action = None
+        player.current_action = None
 
 
 def _eliminate_player_locked(player: Player, reason: str, *, killer: Player | None = None) -> dict[str, Any]:
@@ -815,6 +1015,11 @@ def _eliminate_player_locked(player: Player, reason: str, *, killer: Player | No
     player.current_action = None
     player.status_effect = "ELIMINATED"
     player.last_result = reason
+    if player.battle_id:
+        _end_battle_locked(
+            player.battle_id,
+            reason=f"The battle involving {player.name} ended because a combatant was eliminated.",
+        )
     if killer is not None and killer.id != player.id:
         killer.kills += 1
     return game.add_event(reason, "PLAYER_ELIMINATED")
@@ -850,7 +1055,7 @@ def _resolve_round_locked() -> None:
     missed: list[Player] = [
         player
         for player in game.players.values()
-        if player.alive and not player.action_taken
+        if player.alive and not player.action_taken and not player.battle_id
     ]
 
     for player in missed:
@@ -882,6 +1087,18 @@ def _validate_player_action_locked(
         return False, "The game is not currently accepting player actions."
     if not player.alive:
         return False, "You have been eliminated."
+
+    battle = get_battle_locked(player)
+    if battle:
+        if action not in BATTLE_ACTION_SET:
+            return False, "You are engaged in battle. Only ATTACK, DEFEND, or RUN are available."
+        if player.battle_action:
+            return False, "You have already chosen a combat move for this battle turn."
+        if battle.deadline and datetime.now(timezone.utc) >= battle.deadline:
+            _resolve_expired_battles_locked()
+            return False, "That battle turn has already resolved."
+        return True, ""
+
     if player.action_taken:
         return False, "You have already acted this round."
     if game.round_deadline and datetime.now(timezone.utc) >= game.round_deadline:
@@ -909,6 +1126,16 @@ def _validate_player_action_locked(
             return False, "You cannot attack yourself."
         if target.zone_id != player.zone_id:
             return False, "That player is no longer in your zone."
+        if target.battle_id:
+            return False, "That player is already engaged in battle."
+
+    if action == "GRAB_ITEM":
+        if player.zone_id != "cornucopia":
+            return False, "You can only grab items at the Cornucopia."
+        if not game.zone_items["cornucopia"]:
+            return False, "The Cornucopia is empty."
+        if len(player.inventory) >= MAX_INVENTORY:
+            return False, "Your inventory is full."
 
     if action == "USE_ITEM":
         if not item_id:
@@ -924,57 +1151,171 @@ def _validate_player_action_locked(
     return True, ""
 
 
-def _resolve_attack_locked(attacker: Player, target: Player) -> dict[str, Any]:
-    dodge_chance = 0.05 + max(0, target.speed - attacker.speed) * 0.03
-    if target.status_effect == "HIDDEN":
-        dodge_chance += 0.15
-    dodge_chance = min(0.45, max(0.05, dodge_chance))
-
-    if rng.random() < dodge_chance:
-        attacker.last_result = f"Your attack on {target.name} was dodged."
-        target.last_result = f"You dodged an attack from {attacker.name}."
-        return game.add_event(
-            f"{attacker.name} attacked {target.name}, but the attack was dodged.",
-            "ATTACK_DODGED",
-        )
-
-    base_damage = max(1, attacker.attack + rng.randint(-2, 4))
-    critical = rng.random() < 0.10
+def _attack_damage_locked(attacker: Player, defender: Player, *, defense: bool = False) -> tuple[int, bool, int]:
+    speed_edge = max(-3, min(6, (attacker.speed - defender.speed) // 3))
+    raw = max(1, attacker.attack + rng.randint(-2, 4) + speed_edge)
+    critical = rng.random() < 0.12
     if critical:
-        base_damage += 5
+        raw += max(3, attacker.attack // 2)
 
     reduction = 0
-    if target.status_effect == "ARMORED":
-        reduction = 8
-        target.status_effect = "NORMAL"
+    if defense:
+        reduction += max(5, int(raw * 0.55))
+    if defender.status_effect == "ARMORED":
+        reduction += 8
+        defender.status_effect = "NORMAL"
 
-    damage = max(1, base_damage - reduction)
-    old_health = target.health
-    target.health = max(0, target.health - damage)
-    target.last_result = f"{attacker.name} hit you for {damage} damage. You have {target.health} health left."
+    return max(1, raw - reduction), critical, reduction
 
-    prefix = " Critical hit!" if critical else ""
-    armor_text = " Armor absorbed 8 damage." if reduction else ""
-    attacker.last_result = f"You hit {target.name} for {damage} damage.{prefix}{armor_text}"
 
-    event = game.add_event(
-        f"{attacker.name} attacked {target.name} for {damage} damage.{(' Critical hit.' if critical else '')}{(' Armor reduced the damage.' if reduction else '')}",
-        "PLAYER_ATTACKED",
-    )
+def _resolve_battle_turn_locked(battle: Battle) -> list[dict[str, Any]]:
+    player_a = game.players.get(battle.player_a_id)
+    player_b = game.players.get(battle.player_b_id)
+    if not player_a or not player_b or not player_a.alive or not player_b.alive:
+        _end_battle_locked(battle.id)
+        return []
 
-    if target.health <= 0:
-        target.status_effect = "ELIMINATED"
-        _eliminate_player_locked(
-            target,
-            f"{target.name} ({target.id}) was eliminated by {attacker.name} in {ZONES[target.zone_id].name}.",
-            killer=attacker,
-        )
+    action_a = battle.actions.get(player_a.id)
+    action_b = battle.actions.get(player_b.id)
+    if not action_a or not action_b:
+        return []
+
+    events: list[dict[str, Any]] = []
+    if action_a == "BATTLE_RUN" or action_b == "BATTLE_RUN":
+        runners = [(player_a, player_b, action_a), (player_b, player_a, action_b)]
+        for runner, opponent, runner_action in runners:
+            if runner_action != "BATTLE_RUN":
+                continue
+            chance = max(0.20, min(0.85, 0.50 + (runner.speed - opponent.speed) * 0.04))
+            success = rng.random() < chance
+            if success:
+                runner.last_result = f"You escaped from {opponent.name}."
+                opponent.last_result = f"{runner.name} escaped from the battle."
+                event = game.add_event(
+                    f"{runner.name} escaped the battle with {opponent.name}.",
+                    "BATTLE_RUN",
+                )
+                events.append(event)
+                _end_battle_locked(battle.id)
+                return events
+            runner.last_result = f"You tried to run from {opponent.name}, but failed."
+            opponent.last_result = f"{runner.name} tried to run, but failed."
+            events.append(game.add_event(
+                f"{runner.name} failed to escape {opponent.name}.",
+                "BATTLE_RUN_FAILED",
+            ))
+
+        if action_a == action_b == "BATTLE_RUN":
+            # Neither runner got away; the fight advances to another turn.
+            pass
+        elif action_a == "BATTLE_RUN":
+            # A failed runner is exposed to an attacking opponent; a defender
+            # simply holds position and a second run opportunity is created.
+            if action_b == "BATTLE_ATTACK" and player_a.alive:
+                damage, critical, reduction = _attack_damage_locked(player_b, player_a)
+                player_a.health = max(0, player_a.health - damage)
+                player_b.last_result = f"You caught {player_a.name} while they ran for {damage} damage."
+                player_a.last_result = f"You failed to run and took {damage} damage from {player_b.name}."
+                events.append(game.add_event(
+                    f"{player_b.name} struck {player_a.name} for {damage} damage as they tried to run.{(' Critical hit.' if critical else '')}{(' Armor helped.' if reduction else '')}",
+                    "BATTLE_HIT",
+                ))
+                if player_a.health <= 0:
+                    events.append(_eliminate_player_locked(player_a, f"{player_a.name} ({player_a.id}) was eliminated by {player_b.name} in battle.", killer=player_b))
+                    if game.alive_count <= 1:
+                        _finish_game_locked()
+                    return events
+        elif action_b == "BATTLE_RUN" and action_a == "BATTLE_ATTACK" and player_b.alive:
+            damage, critical, reduction = _attack_damage_locked(player_a, player_b)
+            player_b.health = max(0, player_b.health - damage)
+            player_a.last_result = f"You caught {player_b.name} while they ran for {damage} damage."
+            player_b.last_result = f"You failed to run and took {damage} damage from {player_a.name}."
+            events.append(game.add_event(
+                f"{player_a.name} struck {player_b.name} for {damage} damage as they tried to run.{(' Critical hit.' if critical else '')}{(' Armor helped.' if reduction else '')}",
+                "BATTLE_HIT",
+            ))
+            if player_b.health <= 0:
+                events.append(_eliminate_player_locked(player_b, f"{player_b.name} ({player_b.id}) was eliminated by {player_a.name} in battle.", killer=player_a))
+                if game.alive_count <= 1:
+                    _finish_game_locked()
+                return events
     else:
-        # `old_health` is intentionally retained in the local resolution for clarity
-        # and easier debugging if this mechanic expands later.
-        _ = old_health
+        # Both combatants commit simultaneously. Defending reduces incoming
+        # damage by 55%; armor adds its existing 8-point reduction once.
+        if action_a == "BATTLE_ATTACK":
+            damage, critical, reduction = _attack_damage_locked(player_a, player_b, defense=action_b == "BATTLE_DEFEND")
+            player_b.health = max(0, player_b.health - damage)
+            player_a.last_result = f"You attacked {player_b.name} for {damage} damage."
+            player_b.last_result = f"{player_a.name} attacked you for {damage} damage."
+            events.append(game.add_event(
+                f"{player_a.name} attacked {player_b.name} for {damage} damage.{(' Critical hit.' if critical else '')}{(' Defense/armor reduced the hit.' if reduction else '')}",
+                "BATTLE_HIT",
+            ))
+            if player_b.health <= 0:
+                events.append(_eliminate_player_locked(player_b, f"{player_b.name} ({player_b.id}) was eliminated by {player_a.name} in battle.", killer=player_a))
+                if game.alive_count <= 1:
+                    _finish_game_locked()
+                return events
+        if action_b == "BATTLE_ATTACK" and player_a.alive and player_b.alive:
+            damage, critical, reduction = _attack_damage_locked(player_b, player_a, defense=action_a == "BATTLE_DEFEND")
+            player_a.health = max(0, player_a.health - damage)
+            player_b.last_result = f"You attacked {player_a.name} for {damage} damage."
+            player_a.last_result = f"{player_b.name} attacked you for {damage} damage."
+            events.append(game.add_event(
+                f"{player_b.name} attacked {player_a.name} for {damage} damage.{(' Critical hit.' if critical else '')}{(' Defense/armor reduced the hit.' if reduction else '')}",
+                "BATTLE_HIT",
+            ))
+            if player_a.health <= 0:
+                events.append(_eliminate_player_locked(player_a, f"{player_a.name} ({player_a.id}) was eliminated by {player_b.name} in battle.", killer=player_b))
+                if game.alive_count <= 1:
+                    _finish_game_locked()
+                return events
 
-    return event
+        if action_a == action_b == "BATTLE_DEFEND" and player_a.alive and player_b.alive:
+            player_a.last_result = f"You defended against {player_b.name}."
+            player_b.last_result = f"You defended against {player_a.name}."
+            events.append(game.add_event(
+                f"{player_a.name} and {player_b.name} both held their ground.",
+                "BATTLE_DEFEND",
+            ))
+
+    for player in (player_a, player_b):
+        if player.alive:
+            player.battle_action = None
+
+    if not player_a.alive or not player_b.alive:
+        _end_battle_locked(battle.id)
+        return events
+
+    battle.turn_number += 1
+    battle.actions.clear()
+    battle.deadline = datetime.now(timezone.utc) + timedelta(seconds=BATTLE_TURN_DURATION_SECONDS)
+    for player in (player_a, player_b):
+        player.current_action = "BATTLE"
+        player.action_taken = True
+        player.action_deadline = battle.deadline
+        player.last_result = f"Battle turn {battle.turn_number}: choose ATTACK, DEFEND, or RUN."
+    events.append(game.add_event(
+        f"Battle between {player_a.name} and {player_b.name} moves to turn {battle.turn_number}.",
+        "BATTLE_TURN",
+    ))
+    return events
+
+
+def _resolve_expired_battles_locked() -> bool:
+    changed = False
+    now = datetime.now(timezone.utc)
+    for battle in list(game.battles.values()):
+        if battle.deadline is None or now < battle.deadline:
+            continue
+        for player_id in battle.participant_ids():
+            if player_id not in battle.actions and game.players.get(player_id) and game.players[player_id].alive:
+                battle.actions[player_id] = "BATTLE_DEFEND"
+                game.players[player_id].battle_action = "BATTLE_DEFEND"
+                game.players[player_id].last_result = "You hesitated, so you defended automatically."
+        _resolve_battle_turn_locked(battle)
+        changed = True
+    return changed
 
 
 def _use_item_locked(player: Player, item_id: str) -> dict[str, Any]:
@@ -1007,25 +1348,20 @@ def _use_item_locked(player: Player, item_id: str) -> dict[str, Any]:
     return game.add_event(f"{player.name} used a {item.name} in {ZONES[player.zone_id].name}.", "ITEM_USED")
 
 
-def _search_locked(player: Player) -> dict[str, Any]:
+def _grab_item_locked(player: Player) -> dict[str, Any]:
+    if player.zone_id != "cornucopia":
+        raise HTTPException(status_code=409, detail="Items can only be collected at the Cornucopia.")
     if len(player.inventory) >= MAX_INVENTORY:
-        player.last_result = f"You searched the area, but your inventory is full ({MAX_INVENTORY} items)."
-        return game.add_event(f"{player.name} searched {ZONES[player.zone_id].name}, but their inventory was full.", "PLAYER_SEARCHED")
+        player.last_result = f"Your inventory is full ({MAX_INVENTORY} items)."
+        raise HTTPException(status_code=409, detail="Your inventory is full.")
+    if not game.zone_items["cornucopia"]:
+        player.last_result = "The Cornucopia is empty."
+        raise HTTPException(status_code=409, detail="The Cornucopia is empty.")
 
-    if game.zone_items[player.zone_id]:
-        item = game.zone_items[player.zone_id].pop(0)
-        player.inventory.append(item)
-        player.last_result = f"You found a {item.name}. {item.description}"
-        return game.add_event(f"{player.name} found supplies in {ZONES[player.zone_id].name}.", "ITEM_FOUND")
-
-    if rng.random() < 0.40:
-        item = make_item(random_loot_type())
-        player.inventory.append(item)
-        player.last_result = f"You found a {item.name}. {item.description}"
-        return game.add_event(f"{player.name} found supplies while searching {ZONES[player.zone_id].name}.", "ITEM_FOUND")
-
-    player.last_result = "You searched the area but found nothing useful."
-    return game.add_event(f"{player.name} searched {ZONES[player.zone_id].name} but found nothing.", "PLAYER_SEARCHED")
+    item = game.zone_items["cornucopia"].pop(0)
+    player.inventory.append(item)
+    player.last_result = f"You grabbed a {item.name}. {item.description}"
+    return game.add_event(f"{player.name} grabbed a {item.name} from the Cornucopia.", "ITEM_GRABBED")
 
 
 def _apply_player_action_locked(
@@ -1039,6 +1375,24 @@ def _apply_player_action_locked(
     valid, error = _validate_player_action_locked(player, action, target_zone_id, target_player_id, item_id)
     if not valid:
         raise HTTPException(status_code=409, detail=error)
+
+    if action in BATTLE_ACTION_SET:
+        battle = get_battle_locked(player)
+        if not battle:
+            raise HTTPException(status_code=409, detail="You are not currently in a battle.")
+        player.battle_action = action
+        player.current_action = action
+        player.action_taken = True
+        player.action_deadline = battle.deadline
+        battle.actions[player.id] = action
+        event = game.add_event(
+            f"{player.name} chose {action.replace('BATTLE_', '')} in battle.",
+            "BATTLE_ACTION",
+        )
+        if len(battle.actions) == 2:
+            battle_events = _resolve_battle_turn_locked(battle)
+            event = battle_events[-1] if battle_events else event
+        return event
 
     player.current_action = action
     player.action_taken = True
@@ -1054,26 +1408,45 @@ def _apply_player_action_locked(
         player.health = min(player.max_health, player.health + 5)
         player.last_result = f"You rested and recovered {player.health - old_health} health."
         event = game.add_event(f"{player.name} rested in {ZONES[player.zone_id].name}.", "PLAYER_RESTED")
-    elif action == "HIDE":
-        player.status_effect = "HIDDEN"
-        player.last_result = "You found cover. If someone attacks you this round, your dodge chance is higher."
-        event = game.add_event(f"{player.name} disappeared into cover in {ZONES[player.zone_id].name}.", "PLAYER_HID")
     elif action == "SCOUT":
         adjacent = ZONES[player.zone_id].connected_zones
         counts = [f"{ZONES[zone_id].name}: {game.zone_counts[zone_id]}" for zone_id in adjacent]
         player.last_result = "Nearby population: " + ", ".join(counts) + "."
         event = game.add_event(f"{player.name} scouted the area.", "PLAYER_SCOUTED")
-    elif action == "SEARCH":
-        event = _search_locked(player)
     elif action == "ATTACK":
         target = game.players.get(target_player_id or "")
         if not target or not target.alive:
             raise HTTPException(status_code=409, detail="That player is no longer available.")
-        event = _resolve_attack_locked(player, target)
-        if not target.alive and game.alive_count <= 1:
-            _finish_game_locked()
+        battle = Battle(
+            id=f"B-{secrets.token_hex(5)}",
+            player_a_id=player.id,
+            player_b_id=target.id,
+            started_round=game.round_number,
+            deadline=datetime.now(timezone.utc) + timedelta(seconds=BATTLE_TURN_DURATION_SECONDS),
+        )
+        game.battles[battle.id] = battle
+        player.battle_id = battle.id
+        player.battle_opponent_id = target.id
+        player.battle_action = None
+        player.current_action = "BATTLE"
+        player.action_taken = True
+        player.action_deadline = battle.deadline
+        target.battle_id = battle.id
+        target.battle_opponent_id = player.id
+        target.battle_action = None
+        target.current_action = "BATTLE"
+        target.action_taken = True
+        target.action_deadline = battle.deadline
+        player.last_result = f"You engaged {target.name}. Choose ATTACK, DEFEND, or RUN."
+        target.last_result = f"{player.name} attacked you and you are now engaged. Choose ATTACK, DEFEND, or RUN."
+        event = game.add_event(
+            f"{player.name} engaged {target.name} in battle in {ZONES[player.zone_id].name}.",
+            "BATTLE_STARTED",
+        )
     elif action == "USE_ITEM":
         event = _use_item_locked(player, item_id or "")
+    elif action == "GRAB_ITEM":
+        event = _grab_item_locked(player)
     else:  # WAIT
         player.last_result = "You waited and watched your surroundings."
         event = game.add_event(f"{player.name} waited in {ZONES[player.zone_id].name}.", "PLAYER_WAITED")
@@ -1102,10 +1475,12 @@ async def sync_everyone_full() -> None:
             for player_id, player in game.players.items()
         }
         admin_snapshot = admin_state()
+        spectator_snapshot = spectate_state()
 
     await asyncio.gather(
         *(manager.send_player(pid, {"type": "GAME_STATE", "data": snapshot}) for pid, snapshot in player_snapshots.items()),
         manager.broadcast_admin({"type": "ADMIN_STATE", "data": admin_snapshot}),
+        manager.broadcast_spectators({"type": "SPECTATE_STATE", "data": spectator_snapshot}),
     )
 
 
@@ -1113,14 +1488,29 @@ async def sync_action_result(player_id: str, event: dict[str, Any]) -> None:
     async with state_lock:
         snapshot = player_state(game.players[player_id]) if player_id in game.players else None
         admin_snapshot = admin_state()
+        spectator_snapshot = spectate_state()
 
     sends = [
         manager.broadcast_players({"type": "PUBLIC_EVENT", "data": event}),
         manager.broadcast_admin({"type": "ADMIN_STATE", "data": admin_snapshot}),
+        manager.broadcast_spectators({"type": "SPECTATE_STATE", "data": spectator_snapshot}),
     ]
     if snapshot is not None:
         sends.append(manager.send_player(player_id, {"type": "GAME_STATE", "data": snapshot}))
     await asyncio.gather(*sends)
+
+
+async def sync_player_ids(player_ids: set[str]) -> None:
+    async with state_lock:
+        snapshots = {
+            player_id: player_state(game.players[player_id])
+            for player_id in player_ids
+            if player_id in game.players
+        }
+    await asyncio.gather(*(
+        manager.send_player(player_id, {"type": "GAME_STATE", "data": snapshot})
+        for player_id, snapshot in snapshots.items()
+    ))
 
 
 # ---------------------------------------------------------------------------
@@ -1152,6 +1542,23 @@ async def get_game() -> dict[str, Any]:
 async def get_zones() -> list[dict[str, Any]]:
     async with state_lock:
         return [public_zone_dict(zone, include_counts=True) for zone in ZONES.values()]
+
+
+@app.get("/api/player/{player_id}/state")
+async def get_player_session_state(player_id: str, x_player_token: str | None = Header(default=None)) -> dict[str, Any]:
+    async with state_lock:
+        player = game.players.get(player_id)
+        if not player:
+            raise HTTPException(status_code=404, detail="Player not found")
+        require_player_token(player, x_player_token)
+        return player_state(player)
+
+
+@app.get("/api/spectate/state")
+async def get_spectate_state(x_admin_token: str | None = Header(default=None)) -> dict[str, Any]:
+    require_admin(x_admin_token)
+    async with state_lock:
+        return spectate_state()
 
 
 @app.post("/api/join")
@@ -1187,6 +1594,7 @@ async def join_game(request: JoinRequest) -> dict[str, Any]:
     await asyncio.gather(
         manager.broadcast_players({"type": "PUBLIC_EVENT", "data": event}),
         manager.broadcast_admin({"type": "ADMIN_STATE", "data": admin_state()}),
+        manager.broadcast_spectators({"type": "SPECTATE_STATE", "data": spectate_state()}),
     )
 
     return {
@@ -1206,6 +1614,11 @@ async def player_action(
         if not player:
             raise HTTPException(status_code=404, detail="Player not found")
         require_player_token(player, x_player_token)
+        related_player_ids = {player.id}
+        if request.action.upper() == "ATTACK" and request.targetPlayerId:
+            related_player_ids.add(request.targetPlayerId)
+        elif player.battle_opponent_id:
+            related_player_ids.add(player.battle_opponent_id)
         event = _apply_player_action_locked(
             player,
             request.action,
@@ -1217,6 +1630,7 @@ async def player_action(
         _write_checkpoint_locked()
 
     await sync_action_result(player.id, event)
+    await sync_player_ids(related_player_ids - {player.id})
     return snapshot
 
 
@@ -1262,6 +1676,11 @@ async def admin_action(
             if game.round_deadline:
                 game.paused_remaining_seconds = max(0.0, (game.round_deadline - datetime.now(timezone.utc)).total_seconds())
             game.round_deadline = None
+            now = datetime.now(timezone.utc)
+            for battle in game.battles.values():
+                if battle.deadline:
+                    battle.paused_remaining_seconds = max(0.0, (battle.deadline - now).total_seconds())
+                battle.deadline = None
             for player in game.players.values():
                 if player.alive:
                     player.action_deadline = None
@@ -1272,9 +1691,14 @@ async def admin_action(
                 raise HTTPException(status_code=409, detail="Game is not paused")
             remaining = game.paused_remaining_seconds or ROUND_DURATION_SECONDS
             game.round_deadline = datetime.now(timezone.utc) + timedelta(seconds=max(1, remaining))
+            now = datetime.now(timezone.utc)
+            for battle in game.battles.values():
+                battle_remaining = battle.paused_remaining_seconds or BATTLE_TURN_DURATION_SECONDS
+                battle.deadline = now + timedelta(seconds=max(1, battle_remaining))
+                battle.paused_remaining_seconds = None
             for player in game.players.values():
-                if player.alive and not player.action_taken:
-                    player.action_deadline = game.round_deadline
+                if player.alive:
+                    player.action_deadline = game.battles[player.battle_id].deadline if player.battle_id in game.battles else (None if player.action_taken else game.round_deadline)
             game.status = GameStatus.ACTIVE
             game.paused_remaining_seconds = None
             game.add_event("The arena has resumed.", "GAME_RESUMED")
@@ -1285,12 +1709,10 @@ async def admin_action(
         elif action == "SPAWN_SUPPLY_DROP":
             if game.status not in {GameStatus.ACTIVE, GameStatus.PAUSED}:
                 raise HTTPException(status_code=409, detail="Supply drops can only be triggered during the game")
-            target = request.targetZoneId
-            if target is not None and target not in ZONES:
-                raise HTTPException(status_code=400, detail="Unknown zone")
-            chosen = target or rng.choice(list(OUTER_ZONE_IDS))
-            game.zone_items[chosen].append(make_item(random_loot_type()))
-            selected_event = game.add_event(f"The admin dropped supplies in {ZONES[chosen].name}.", "SUPPLY_DROP")
+            if request.targetZoneId not in {None, "cornucopia"}:
+                raise HTTPException(status_code=400, detail="Player supplies can only be placed at the Cornucopia.")
+            game.zone_items["cornucopia"].append(make_item(random_loot_type()))
+            selected_event = game.add_event("The admin dropped supplies at the Cornucopia.", "SUPPLY_DROP")
         elif action == "TRIGGER_HAZARD":
             if game.status not in {GameStatus.ACTIVE, GameStatus.PAUSED}:
                 raise HTTPException(status_code=409, detail="Hazards can only be triggered during the game")
@@ -1333,6 +1755,8 @@ async def admin_action(
                     raise HTTPException(status_code=409, detail="The game is already over")
                 if target.alive:
                     raise HTTPException(status_code=409, detail="That player is already alive")
+                if target.battle_id:
+                    _end_battle_locked(target.battle_id, reason=f"The battle involving {target.name} was cleared during admin restoration.")
                 target.alive = True
                 target.health = max(1, min(target.max_health, request.value or 50))
                 target.status_effect = "NORMAL"
@@ -1345,6 +1769,8 @@ async def admin_action(
                 destination = request.targetZoneId
                 if not destination or destination not in ZONES:
                     raise HTTPException(status_code=400, detail="Choose a destination zone")
+                if target.battle_id:
+                    _end_battle_locked(target.battle_id, reason=f"The battle involving {target.name} ended after an admin move.")
                 if target.alive:
                     target.zone_id = destination
                 else:
@@ -1352,6 +1778,8 @@ async def admin_action(
                 target.last_result = f"An admin moved you to {ZONES[destination].name}."
                 selected_event = game.add_event(f"Admin moved {target.name} ({target.id}) to {ZONES[destination].name}.", "PLAYER_MOVED_ADMIN")
             elif action == "SET_HEALTH":
+                if target.battle_id:
+                    _end_battle_locked(target.battle_id, reason=f"The battle involving {target.name} ended after an admin health change.")
                 target.health = min(target.max_health, request.value or target.health)
                 if target.health > 0 and not target.alive and game.status != GameStatus.GAME_OVER:
                     target.alive = True
@@ -1364,6 +1792,8 @@ async def admin_action(
             elif action == "SET_STATS":
                 if request.attack is None and request.speed is None and request.value is None:
                     raise HTTPException(status_code=400, detail="Provide at least one stat value")
+                if target.battle_id:
+                    _end_battle_locked(target.battle_id, reason=f"The battle involving {target.name} ended after an admin stat change.")
                 if request.value is not None:
                     target.health = min(target.max_health, request.value)
                 if request.attack is not None:
@@ -1393,6 +1823,7 @@ async def admin_action(
             game.round_deadline = None
             game.paused_remaining_seconds = None
             game.winner_id = None
+            game.battles.clear()
             game.players.clear()
             game.event_log.clear()
             for items in game.zone_items.values():
@@ -1434,6 +1865,9 @@ async def player_ws(websocket: WebSocket, player_id: str, token: str | None = No
         admin_snapshot = admin_state()
     await manager.send_player(player_id, {"type": "GAME_STATE", "data": snapshot})
     await manager.broadcast_admin({"type": "ADMIN_STATE", "data": admin_snapshot})
+    async with state_lock:
+        spectator_snapshot = spectate_state()
+    await manager.broadcast_spectators({"type": "SPECTATE_STATE", "data": spectator_snapshot})
 
     try:
         while True:
@@ -1448,7 +1882,9 @@ async def player_ws(websocket: WebSocket, player_id: str, token: str | None = No
                     game.players[player_id].connected = False
                     _write_checkpoint_locked()
                     admin_snapshot = admin_state()
+                    spectator_snapshot = spectate_state()
             await manager.broadcast_admin({"type": "ADMIN_STATE", "data": admin_snapshot})
+            await manager.broadcast_spectators({"type": "SPECTATE_STATE", "data": spectator_snapshot})
 
 
 @app.websocket("/ws/admin")
@@ -1469,3 +1905,23 @@ async def admin_ws(websocket: WebSocket, token: str | None = None) -> None:
                 await websocket.send_json({"type": "PONG"})
     except WebSocketDisconnect:
         manager.disconnect_admin(websocket)
+
+
+@app.websocket("/ws/spectate")
+async def spectate_ws(websocket: WebSocket, token: str | None = None) -> None:
+    if not token or not secrets.compare_digest(token, ADMIN_TOKEN):
+        await websocket.close(code=1008)
+        return
+
+    await manager.connect_spectator(websocket)
+    async with state_lock:
+        snapshot = spectate_state()
+    await websocket.send_json({"type": "SPECTATE_STATE", "data": snapshot})
+
+    try:
+        while True:
+            message = await websocket.receive_json()
+            if message.get("type") == "PING":
+                await websocket.send_json({"type": "PONG"})
+    except WebSocketDisconnect:
+        manager.disconnect_spectator(websocket)

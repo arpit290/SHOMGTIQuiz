@@ -45,6 +45,21 @@ export type Player = {
   kills: number
   inventory: InventoryItem[]
   joinedAt?: string
+  battleId: string | null
+  battleOpponentId: string | null
+  battleAction: string | null
+}
+
+export type Battle = {
+  id: string
+  playerAId: string
+  playerBId: string
+  turn: number
+  deadline: string | null
+  startedRound: number
+  yourAction?: string | null
+  opponentActionSubmitted?: boolean
+  actions?: Record<string, string>
 }
 
 export type GameEvent = {
@@ -75,6 +90,8 @@ export type PlayerGameState = {
   maxPlayers: number
   winnerId: string | null
   events: GameEvent[]
+  battleTurnDurationSeconds: number
+  battle: Battle | null
 }
 
 export type AdminState = {
@@ -94,5 +111,27 @@ export type AdminState = {
   winnerId: string | null
   zones: Zone[]
   players: Player[]
+  events: GameEvent[]
+  battles: Battle[]
+}
+
+export type SpectatePlayer = Player & { battle: Battle | null }
+
+export type SpectateState = {
+  gameId: string
+  status: GameStatus
+  phase: GamePhase
+  round: number
+  roundDurationSeconds: number
+  battleTurnDurationSeconds: number
+  serverNow: string
+  roundDeadline: string | null
+  playerCount: number
+  aliveCount: number
+  maxPlayers: number
+  winnerId: string | null
+  zones: Zone[]
+  players: SpectatePlayer[]
+  battles: Battle[]
   events: GameEvent[]
 }

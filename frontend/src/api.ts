@@ -38,6 +38,13 @@ export async function joinGame(name: string) {
   }>
 }
 
+export async function getPlayerState(playerId: string, token: string) {
+  const response = await fetch(`${API_BASE}/api/player/${encodeURIComponent(playerId)}/state`, {
+    headers: { 'X-Player-Token': token },
+  })
+  return parseResponse(response)
+}
+
 export async function submitAction(
   token: string,
   playerId: string,
@@ -96,10 +103,21 @@ export async function getAdminState(token: string) {
   return parseResponse(response)
 }
 
+export async function getSpectateState(token: string) {
+  const response = await fetch(`${API_BASE}/api/spectate/state`, {
+    headers: { 'X-Admin-Token': token },
+  })
+  return parseResponse(response)
+}
+
 export function playerWsUrl(playerId: string, token: string) {
   return `${WS_BASE}/ws/player/${encodeURIComponent(playerId)}?token=${encodeURIComponent(token)}`
 }
 
 export function adminWsUrl(token: string) {
   return `${WS_BASE}/ws/admin?token=${encodeURIComponent(token)}`
+}
+
+export function spectateWsUrl(token: string) {
+  return `${WS_BASE}/ws/spectate?token=${encodeURIComponent(token)}`
 }

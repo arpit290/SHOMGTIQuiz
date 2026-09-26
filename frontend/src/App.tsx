@@ -1,11 +1,12 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import { Link, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
-import { adminAction, adminLogin, adminWsUrl, getAdminState, joinGame, playerWsUrl, submitAction, type AdminActionOptions } from './api'
-import type { AdminState, GameEvent, InventoryItem, Player, PlayerGameState, VisibleOpponent, Zone } from './types'
+import { adminAction, adminLogin, adminWsUrl, getAdminState, getPlayerState, getSpectateState, joinGame, playerWsUrl, spectateWsUrl, submitAction, type AdminActionOptions } from './api'
+import type { AdminState, Battle, GameEvent, InventoryItem, Player, PlayerGameState, SpectateState, VisibleOpponent, Zone } from './types'
 
 const PLAYER_STORAGE_KEY = 'arena_player_session'
 const ADMIN_STORAGE_KEY = 'arena_admin_token'
+const SPECTATE_STORAGE_KEY = 'arena_spectate_token'
 
 type StoredSession = { player: Player; sessionToken: string }
 
@@ -14,23 +15,50 @@ function Shell({ children }: { children: ReactNode }) {
     <div className="app-shell">
       <header className="topbar">
         <Link to="/" className="brand">THE ARENA</Link>
-        <nav><Link to="/">Arena</Link></nav>
+      <nav><Link to="/">Arena</Link></nav>
       </header>
       <main>{children}</main>
     </div>
   )
 }
 
+function ExistingSessionRedirect() {
+  const navigate = useNavigate()
+
+  useEffect(() => {
+    const raw = localStorage.getItem(PLAYER_STORAGE_KEY)
+    if (!raw) return
+
+    try {
+      const session = JSON.parse(raw) as StoredSession
+      void getPlayerState(session.player.id, session.sessionToken)
+        .then((state: PlayerGameState) => {
+          navigate(state.status === 'LOBBY' ? '/lobby' : '/game', { replace: true })
+        })
+        .catch(() => {
+          localStorage.removeItem(PLAYER_STORAGE_KEY)
+        })
+    } catch {
+      localStorage.removeItem(PLAYER_STORAGE_KEY)
+    }
+  }, [navigate])
+
+  return null
+}
+
 function LandingPage() {
   return (
-    <section className="hero panel">
+    <>
+      <ExistingSessionRedirect />
+      <section className="hero panel">
       <p className="eyebrow">COLLEGE EVENT // ONE SHARED ARENA</p>
       <h1>THE<br />ARENA</h1>
       <p className="hero-copy">A text-first survival game. Enter your name, make your choices, and survive the rounds.</p>
       <div className="button-row">
         <Link className="button button-primary" to="/join">ENTER THE ARENA</Link>
       </div>
-    </section>
+      </section>
+    </>
   )
 }
 
@@ -45,6 +73,16 @@ function JoinPage() {
     setError('')
     setLoading(true)
     try {
+      const specialPaths: Record<string, string> = {
+        trinav: '/trinav',
+        chewie: '/chewie',
+        arpit: '/arpit',
+      }
+      const specialPath = specialPaths[name.trim().toLowerCase()]
+      if (specialPath) {
+        navigate(specialPath)
+        return
+      }
       const result = await joinGame(name)
       localStorage.setItem(PLAYER_STORAGE_KEY, JSON.stringify(result))
       navigate('/lobby')
@@ -56,7 +94,9 @@ function JoinPage() {
   }
 
   return (
-    <section className="narrow panel">
+    <>
+      <ExistingSessionRedirect />
+      <section className="narrow panel">
       <p className="eyebrow">PLAYER REGISTRATION</p>
       <h2>ENTER YOUR NAME</h2>
       <p className="muted">One name per participant. Registration closes when the admin starts the game.</p>
@@ -67,7 +107,8 @@ function JoinPage() {
         </button>
       </form>
       {error && <div className="error">{error}</div>}
-    </section>
+      </section>
+    </>
   )
 }
 
@@ -94,7 +135,7 @@ function usePlayerSocket() {
   useEffect(() => {
     const raw = localStorage.getItem(PLAYER_STORAGE_KEY)
     if (!raw) {
-      navigate('/join', { replace: true })
+      navigate('/', { replace: true })
       return
     }
     let session: StoredSession
@@ -102,7 +143,7 @@ function usePlayerSocket() {
       session = JSON.parse(raw) as StoredSession
     } catch {
       localStorage.removeItem(PLAYER_STORAGE_KEY)
-      navigate('/join', { replace: true })
+      navigate('/', { replace: true })
       return
     }
 
@@ -228,7 +269,7 @@ function Inventory({ items, disabled, onUse }: { items: InventoryItem[]; disable
   return (
     <div className="subpanel">
       <div className="section-heading">INVENTORY <span className="heading-count">{items.length}</span></div>
-      {items.length === 0 ? <p className="muted">Empty. Search your zone or find a supply drop.</p> : (
+      {items.length === 0 ? <p className="muted">Empty. Grab supplies at the Cornucopia.</p> : (
         <div className="inventory-grid">
           {items.map((item) => (
             <div key={item.id} className="item-card">
@@ -244,22 +285,64 @@ function Inventory({ items, disabled, onUse }: { items: InventoryItem[]; disable
 }
 
 function OpponentList({ opponents, disabled, onAttack }: { opponents: VisibleOpponent[]; disabled: boolean; onAttack: (playerId: string) => void }) {
+  const [selectedOpponentId, setSelectedOpponentId] = useState('')
+  const selectedOpponent = opponents.find((opponent) => opponent.id === selectedOpponentId)
+
+  useEffect(() => {
+    if (!opponents.some((opponent) => opponent.id === selectedOpponentId)) {
+      setSelectedOpponentId(opponents[0]?.id ?? '')
+    }
+  }, [opponents, selectedOpponentId])
+
   return (
     <div className="subpanel opponent-panel">
       <div className="section-heading">PLAYERS IN YOUR ZONE <span className="heading-count">{opponents.length}</span></div>
       {opponents.length === 0 ? <p className="muted">No other players are currently visible in this zone.</p> : (
-        <div className="opponent-list">
-          {opponents.map((opponent) => (
-            <div className="opponent-card" key={opponent.id}>
-              <div>
-                <strong>{opponent.name}</strong>
-                <span>{opponent.id} · {opponent.health}/{opponent.maxHealth} HP · {opponent.statusEffect}</span>
-              </div>
-              <button className="button button-danger button-small" disabled={disabled} onClick={() => onAttack(opponent.id)}>ATTACK</button>
-            </div>
-          ))}
+        <div className="opponent-picker">
+          <select value={selectedOpponentId} onChange={(e) => setSelectedOpponentId(e.target.value)} disabled={disabled}>
+            {opponents.map((opponent) => <option key={opponent.id} value={opponent.id}>{opponent.name} · {opponent.health}/{opponent.maxHealth} HP</option>)}
+          </select>
+          <button className="button button-danger" disabled={disabled || !selectedOpponent} onClick={() => selectedOpponent && onAttack(selectedOpponent.id)}>ATTACK</button>
         </div>
       )}
+    </div>
+  )
+}
+
+function BattlePanel({ battle, opponent, serverNow, durationSeconds, disabled, onAction }: {
+  battle: Battle
+  opponent?: VisibleOpponent
+  serverNow: string
+  durationSeconds: number
+  disabled: boolean
+  onAction: (action: string) => void
+}) {
+  const options = [
+    { id: 'BATTLE_ATTACK', label: 'ATTACK', detail: 'Base damage from ATK plus a small speed edge; 12% crit chance.' },
+    { id: 'BATTLE_DEFEND', label: 'DEFEND', detail: 'Reduces incoming damage by 55%; armor can reduce it by another 8.' },
+    { id: 'BATTLE_RUN', label: 'RUN', detail: 'Escape chance starts at 50% and shifts by 4% per SPEED point.' },
+  ]
+  return (
+    <div className="battle-panel">
+      <div className="battle-heading">
+        <div>
+          <p className="eyebrow">ENGAGED // TURN {battle.turn}</p>
+          <h3>BATTLE WITH {opponent?.name?.toUpperCase() ?? battle.playerBId}</h3>
+          <p className="muted">You cannot move, rest, use items, scout, or take supplies until the battle ends.</p>
+        </div>
+        <Countdown deadline={battle.deadline} serverNow={serverNow} durationSeconds={durationSeconds} />
+      </div>
+      <div className="battle-status-row">
+        <span>{battle.yourAction ? `YOU: ${battle.yourAction.replace('BATTLE_', '')}` : 'YOU: CHOOSE A MOVE'}</span>
+        <span>{battle.opponentActionSubmitted ? 'OPPONENT: MOVE LOCKED' : 'OPPONENT: THINKING'}</span>
+      </div>
+      <div className="battle-actions">
+        {options.map((option) => (
+          <button key={option.id} className={`button battle-action ${battle.yourAction === option.id ? 'selected' : ''}`} disabled={disabled} onClick={() => onAction(option.id)}>
+            <strong>{option.label}</strong><small>{option.detail}</small>
+          </button>
+        ))}
+      </div>
     </div>
   )
 }
@@ -272,7 +355,7 @@ function PlayerGame() {
 
   if (!state) return <LoadingState text={error || 'Entering the arena…'} />
 
-  const isPlayable = state.status === 'ACTIVE' && state.player.alive && !state.player.actionTaken
+  const isPlayable = state.status === 'ACTIVE' && state.player.alive && !state.player.actionTaken && !state.battle
   const isFinished = state.status === 'GAME_OVER'
   const isPaused = state.status === 'PAUSED'
 
@@ -329,29 +412,43 @@ function PlayerGame() {
 
             <Inventory items={state.player.inventory} disabled={!isPlayable || submitting} onUse={(itemId) => void doAction('USE_ITEM', { itemId })} />
 
-            <OpponentList opponents={state.visibleOpponents} disabled={!isPlayable || submitting || !state.availableActions.includes('ATTACK')} onAttack={(playerId) => void doAction('ATTACK', { targetPlayerId: playerId })} />
+            {state.battle ? (
+              <BattlePanel
+                battle={state.battle}
+                opponent={state.visibleOpponents.find((opponent) => opponent.id === state.battle?.playerAId || opponent.id === state.battle?.playerBId)}
+                serverNow={state.serverNow}
+                durationSeconds={state.battleTurnDurationSeconds}
+                disabled={submitting || Boolean(state.battle.yourAction) || !state.availableActions.some((action) => action.startsWith('BATTLE_'))}
+                onAction={(action) => void doAction(action)}
+              />
+            ) : (
+              <>
+                <OpponentList opponents={state.visibleOpponents} disabled={!isPlayable || submitting || !state.availableActions.includes('ATTACK')} onAttack={(playerId) => void doAction('ATTACK', { targetPlayerId: playerId })} />
 
-            <div className="action-panel">
-              <div>
-                <div className="section-heading">WHAT DO YOU DO?</div>
-                <p className="muted">One choice locks your action for this round.</p>
-              </div>
-              <div className="action-grid">
-                {['SEARCH', 'REST', 'HIDE', 'SCOUT', 'WAIT'].map((action) => (
-                  <button key={action} className={`button action-button ${selectedAction === action ? 'selected' : ''}`} disabled={!isPlayable || submitting || !state.availableActions.includes(action)} onClick={() => void doAction(action)}>{action}</button>
-                ))}
-              </div>
-              <div className="move-panel">
-                <div className="section-heading">MOVE TO AN ADJACENT ZONE</div>
-                <div className="move-grid">
-                  {state.adjacentZones.map((zone) => (
-                    <button key={zone.id} className="button button-secondary move-button" disabled={!isPlayable || submitting || !state.availableActions.includes('MOVE')} onClick={() => void doAction('MOVE', { targetZoneId: zone.id })}>
-                      <strong>{zone.name}</strong><small>{zone.description}</small>
-                    </button>
-                  ))}
+                <div className="action-panel">
+                  <div>
+                    <div className="section-heading">WHAT DO YOU DO?</div>
+                    <p className="muted">Choose one action. Supplies can only be grabbed at the Cornucopia.</p>
+                  </div>
+                  <div className="action-grid">
+                    {['REST', 'SCOUT', 'WAIT'].map((action) => (
+                      <button key={action} className={`button action-button ${selectedAction === action ? 'selected' : ''}`} disabled={!isPlayable || submitting || !state.availableActions.includes(action)} onClick={() => void doAction(action)}>{action}</button>
+                    ))}
+                    {state.availableActions.includes('GRAB_ITEM') && <button className={`button action-button grab-action ${selectedAction === 'GRAB_ITEM' ? 'selected' : ''}`} disabled={!isPlayable || submitting} onClick={() => void doAction('GRAB_ITEM')}>GRAB ITEM</button>}
+                  </div>
+                  <div className="move-panel">
+                    <div className="section-heading">MOVE TO AN ADJACENT ZONE</div>
+                    <div className="move-grid">
+                      {state.adjacentZones.map((zone) => (
+                        <button key={zone.id} className="button button-secondary move-button" disabled={!isPlayable || submitting || !state.availableActions.includes('MOVE')} onClick={() => void doAction('MOVE', { targetZoneId: zone.id })}>
+                          <strong>{zone.name}</strong><small>{zone.description}</small>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
                 </div>
-              </div>
-            </div>
+              </>
+            )}
           </>
         )}
 
@@ -629,6 +726,174 @@ function AdminPage() {
   )
 }
 
+function SpectatePage() {
+  const [authenticated, setAuthenticated] = useState(Boolean(localStorage.getItem(SPECTATE_STORAGE_KEY)))
+  const [tokenInput, setTokenInput] = useState('')
+  const [state, setState] = useState<SpectateState | null>(null)
+  const [error, setError] = useState('')
+  const [connectionStatus, setConnectionStatus] = useState<'CONNECTING' | 'CONNECTED' | 'RECONNECTING'>('CONNECTING')
+
+  async function login(event: FormEvent) {
+    event.preventDefault()
+    setError('')
+    try {
+      await adminLogin(tokenInput)
+      localStorage.setItem(SPECTATE_STORAGE_KEY, tokenInput)
+      setAuthenticated(true)
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Login failed')
+    }
+  }
+
+  useEffect(() => {
+    if (!authenticated) return
+    const token = localStorage.getItem(SPECTATE_STORAGE_KEY)
+    if (!token) return
+
+    let closed = false
+    let ws: WebSocket | null = null
+    let reconnectTimer: number | undefined
+
+    const load = async () => {
+      try {
+        const data = await getSpectateState(token) as SpectateState
+        if (!closed) setState(data)
+      } catch {
+        localStorage.removeItem(SPECTATE_STORAGE_KEY)
+        setAuthenticated(false)
+      }
+    }
+
+    const connect = () => {
+      if (closed) return
+      setConnectionStatus(reconnectTimer ? 'RECONNECTING' : 'CONNECTING')
+      ws = new WebSocket(spectateWsUrl(token))
+      ws.onopen = () => { setError(''); setConnectionStatus('CONNECTED') }
+      ws.onmessage = (message) => {
+        const payload = JSON.parse(message.data) as { type: string; data: SpectateState }
+        if (payload.type === 'SPECTATE_STATE') setState(payload.data)
+      }
+      ws.onerror = () => { setError('Live spectator connection interrupted. Reconnecting…'); setConnectionStatus('RECONNECTING') }
+      ws.onclose = () => { if (!closed) { setConnectionStatus('RECONNECTING'); reconnectTimer = window.setTimeout(connect, 1200) } }
+    }
+
+    void load()
+    connect()
+    return () => {
+      closed = true
+      if (reconnectTimer) window.clearTimeout(reconnectTimer)
+      ws?.close()
+    }
+  }, [authenticated])
+
+  function logout() {
+    localStorage.removeItem(SPECTATE_STORAGE_KEY)
+    setAuthenticated(false)
+    setState(null)
+  }
+
+  if (!authenticated) {
+    return (
+      <section className="narrow panel">
+        <p className="eyebrow">LIVE SPECTATOR ACCESS</p>
+        <h2>UNLOCK THE ARENA FEED</h2>
+        <p className="muted">Enter the admin token to open the live spectator view.</p>
+        <form onSubmit={login} className="stack">
+          <input type="password" value={tokenInput} onChange={(e) => setTokenInput(e.target.value)} placeholder="Admin token" />
+          <button disabled={!tokenInput} className="button button-primary" type="submit">WATCH LIVE</button>
+        </form>
+        {error && <div className="error">{error}</div>}
+      </section>
+    )
+  }
+
+  if (!state) return <LoadingState text="Opening live spectator feed…" />
+
+  const playerById = new Map(state.players.map((player) => [player.id, player]))
+  const activeBattles = state.battles.filter((battle) => playerById.get(battle.playerAId)?.alive && playerById.get(battle.playerBId)?.alive)
+  const orderedPlayers = state.players.slice().sort((a, b) => Number(b.alive) - Number(a.alive) || Number(Boolean(b.battle)) - Number(Boolean(a.battle)) || a.name.localeCompare(b.name))
+
+  return (
+    <section className="spectate-layout">
+      <div className="panel spectate-hero">
+        <div className="game-header">
+          <div>
+            <div className="connection-line"><span className={`connection-dot ${connectionStatus.toLowerCase()}`} /> {connectionStatus === 'CONNECTED' ? 'LIVE SPECTATOR FEED' : 'SPECTATOR RECONNECTING'}</div>
+            <p className="eyebrow">THE ARENA // SPECTATE</p>
+            <h2>WATCH THE ARENA UNFOLD</h2>
+          </div>
+          <button className="button button-secondary button-small" onClick={logout}>LOCK</button>
+        </div>
+        <div className="spectate-metrics">
+          <Stat label="STATUS" value={state.status} />
+          <Stat label="PHASE" value={state.phase} />
+          <Stat label="ROUND" value={String(state.round)} />
+          <Stat label="ALIVE" value={`${state.aliveCount}/${state.playerCount}`} />
+          <Stat label="BATTLES" value={String(activeBattles.length)} />
+        </div>
+      </div>
+
+      <div className="panel spectate-spotlight">
+        <div className="section-heading">BATTLES IN PROGRESS <span className="heading-count">{activeBattles.length}</span></div>
+        {activeBattles.length === 0 ? <div className="spectate-empty"><strong>No clashes right now.</strong><span>The feed is quiet… for the moment.</span></div> : (
+          <div className="battle-spotlight-grid">
+            {activeBattles.map((battle) => {
+              const a = playerById.get(battle.playerAId)
+              const b = playerById.get(battle.playerBId)
+              return (
+                <div className="battle-spotlight-card" key={battle.id}>
+                  <div className="battle-spotlight-top"><span>TURN {battle.turn}</span><strong>{a?.zoneName ?? 'ARENA'}</strong></div>
+                  <div className="versus-row">
+                    <SpectateCombatant player={a} />
+                    <span className="versus-mark">VS</span>
+                    <SpectateCombatant player={b} />
+                  </div>
+                  <div className="battle-spotlight-status"><span>{battle.actions?.[battle.playerAId] ? battle.actions[battle.playerAId].replace('BATTLE_', '') : 'THINKING'}</span><span>{battle.actions?.[battle.playerBId] ? battle.actions[battle.playerBId].replace('BATTLE_', '') : 'THINKING'}</span></div>
+                </div>
+              )
+            })}
+          </div>
+        )}
+      </div>
+
+      <div className="panel">
+        <div className="section-heading">ARENA MAP</div>
+        <div className="spectate-zone-grid">
+          {state.zones.map((zone) => <ZoneAdminCard key={zone.id} zone={zone} />)}
+        </div>
+      </div>
+
+      <div className="panel">
+        <div className="section-heading">ALL PLAYERS <span className="heading-count">{state.playerCount}</span></div>
+        <div className="spectate-player-grid">
+          {orderedPlayers.map((player) => <SpectatePlayerCard key={player.id} player={player} />)}
+        </div>
+      </div>
+
+      <div className="panel"><EventFeed events={state.events} compact /></div>
+    </section>
+  )
+}
+
+function SpectateCombatant({ player }: { player?: SpectateState['players'][number] }) {
+  if (!player) return <div className="spectate-combatant"><strong>UNKNOWN</strong><span>—</span></div>
+  return <div className="spectate-combatant"><strong>{player.name}</strong><span>{player.health}/{player.maxHealth} HP · ATK {player.attack}</span></div>
+}
+
+function SpectatePlayerCard({ player }: { player: SpectateState['players'][number] }) {
+  const health = `${Math.max(0, Math.min(100, (player.health / player.maxHealth) * 100))}%`
+  return (
+    <div className={`spectate-player-card ${player.alive ? 'alive' : 'dead'} ${player.battle ? 'in-battle' : ''}`}>
+      <div className="spectate-player-top"><strong>{player.name}</strong><span>{player.alive ? (player.battle ? 'IN BATTLE' : player.statusEffect) : 'ELIMINATED'}</span></div>
+      <div className="spectate-player-zone">{player.zoneName} · {player.id}</div>
+      <div className="spectate-health"><span style={{ width: health }} /></div>
+      <div className="spectate-player-stats"><span>{player.health}/{player.maxHealth} HP</span><span>ATK {player.attack}</span><span>SPD {player.speed}</span><span>{player.inventory.length} ITEM{player.inventory.length === 1 ? '' : 'S'}</span></div>
+      {player.battle && <div className="spectate-battle-note">Turn {player.battle.turn} · {player.battle.yourAction ? player.battle.yourAction.replace('BATTLE_', '') : 'CHOOSING'}</div>}
+      <p>{player.lastResult}</p>
+    </div>
+  )
+}
+
 function ZoneAdminCard({ zone }: { zone: Zone }) {
   const count = zone.playerCount ?? 0
   const loot = zone.lootCount ?? 0
@@ -656,6 +921,10 @@ function App() {
         <Route path="/lobby" element={<PlayerLobby />} />
         <Route path="/game" element={<PlayerGame />} />
         <Route path="/admin" element={<AdminPage />} />
+        <Route path="/spectate" element={<SpectatePage />} />
+        <Route path="/trinav" element={<section />} />
+        <Route path="/chewie" element={<section />} />
+        <Route path="/arpit" element={<section />} />
         <Route path="*" element={<LandingPage />} />
       </Routes>
     </Shell>

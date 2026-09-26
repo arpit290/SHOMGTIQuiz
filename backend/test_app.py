@@ -17,6 +17,7 @@ def reset_state() -> None:
     app.game.paused_remaining_seconds = None
     app.game.winner_id = None
     app.game.players.clear()
+    app.game.battles.clear()
     app.game.event_log.clear()
     app.game.hazard_zones.clear()
     for items in app.game.zone_items.values():
@@ -126,7 +127,7 @@ def test_non_adjacent_move_rejected() -> None:
     reset_state()
 
 
-def test_rest_heals_and_search_can_find_existing_supply() -> None:
+def test_rest_and_cornucopia_grab_replace_search_and_hide() -> None:
     reset_state()
     join = client.post("/api/join", json={"name": "Arjun"}).json()
     client.post("/api/join", json={"name": "Rohan"})
@@ -134,7 +135,6 @@ def test_rest_heals_and_search_can_find_existing_supply() -> None:
 
     player = app.game.players[join["player"]["id"]]
     player.health = 80
-    app.game.zone_items[player.zone_id].append(app.make_item("MEDKIT"))
 
     rest = client.post(
         "/api/action",
@@ -144,7 +144,6 @@ def test_rest_heals_and_search_can_find_existing_supply() -> None:
     assert rest.status_code == 200
     assert rest.json()["player"]["health"] == 85
 
-    # Move the player into a fresh round without relying on elapsed wall-clock time.
     player.action_taken = False
     player.current_action = None
     player.action_deadline = app.game.round_deadline
@@ -153,13 +152,32 @@ def test_rest_heals_and_search_can_find_existing_supply() -> None:
         headers={"X-Player-Token": join["sessionToken"]},
         json={"playerId": join["player"]["id"], "action": "SEARCH"},
     )
-    assert search.status_code == 200
-    assert len(search.json()["player"]["inventory"]) == 1
-    assert search.json()["player"]["inventory"][0]["type"] == "MEDKIT"
+    assert search.status_code == 409
+
+    player.action_taken = False
+    player.current_action = None
+    player.action_deadline = app.game.round_deadline
+    hide = client.post(
+        "/api/action",
+        headers={"X-Player-Token": join["sessionToken"]},
+        json={"playerId": join["player"]["id"], "action": "HIDE"},
+    )
+    assert hide.status_code == 409
+
+    player.zone_id = "cornucopia"
+    app.game.zone_items["cornucopia"].clear()
+    app.game.zone_items["cornucopia"].append(app.make_item("MEDKIT"))
+    grab = client.post(
+        "/api/action",
+        headers={"X-Player-Token": join["sessionToken"]},
+        json={"playerId": player.id, "action": "GRAB_ITEM"},
+    )
+    assert grab.status_code == 200
+    assert grab.json()["player"]["inventory"][0]["type"] == "MEDKIT"
     reset_state()
 
 
-def test_attack_requires_same_zone_target_and_can_eliminate() -> None:
+def test_attack_engages_both_players_and_battle_actions_can_eliminate() -> None:
     reset_state()
     attacker_join, _ = start_small_game(["Attacker", "Target"])
     attacker = app.game.players[attacker_join[0]["player"]["id"]]
@@ -179,12 +197,73 @@ def test_attack_requires_same_zone_target_and_can_eliminate() -> None:
         },
     )
     assert response.status_code == 200
+    assert attacker.battle_id is not None
+    assert target.battle_id == attacker.battle_id
+    assert attacker.health == 100
+    assert target.health == 100
+    assert "BATTLE_ATTACK" in response.json()["availableActions"]
+
+    defender_move = client.post(
+        "/api/action",
+        headers={"X-Player-Token": target.session_token},
+        json={"playerId": target.id, "action": "BATTLE_ATTACK"},
+    )
+    assert defender_move.status_code == 200
+    attacker_move = client.post(
+        "/api/action",
+        headers={"X-Player-Token": attacker.session_token},
+        json={"playerId": attacker.id, "action": "BATTLE_ATTACK"},
+    )
+    assert attacker_move.status_code == 200
     assert target.alive is False
     assert target.health == 0
     assert attacker.kills == 1
     assert "eliminated" in target.last_result.lower()
     assert app.game.status == app.GameStatus.GAME_OVER
     assert app.game.winner_id == attacker.id
+    reset_state()
+
+
+def test_battle_blocks_normal_actions_and_defend_reduces_damage() -> None:
+    reset_state()
+    joins, _ = start_small_game(["Attacker", "Target"])
+    attacker = app.game.players[joins[0]["player"]["id"]]
+    target = app.game.players[joins[1]["player"]["id"]]
+    target.zone_id = attacker.zone_id
+    attacker.attack = 20
+    app.rng = __import__("random").Random(999)
+
+    engaged = client.post(
+        "/api/action",
+        headers={"X-Player-Token": attacker.session_token},
+        json={"playerId": attacker.id, "action": "ATTACK", "targetPlayerId": target.id},
+    )
+    assert engaged.status_code == 200
+
+    blocked = client.post(
+        "/api/action",
+        headers={"X-Player-Token": target.session_token},
+        json={"playerId": target.id, "action": "REST"},
+    )
+    assert blocked.status_code == 409
+
+    target.inventory.append(app.make_item("ARMOR"))
+    target.status_effect = "ARMORED"
+    target_choice = client.post(
+        "/api/action",
+        headers={"X-Player-Token": target.session_token},
+        json={"playerId": target.id, "action": "BATTLE_DEFEND"},
+    )
+    assert target_choice.status_code == 200
+    attacker_choice = client.post(
+        "/api/action",
+        headers={"X-Player-Token": attacker.session_token},
+        json={"playerId": attacker.id, "action": "BATTLE_ATTACK"},
+    )
+    assert attacker_choice.status_code == 200
+    assert target.health < 100
+    assert target.health >= 80
+    assert target.battle_id is not None
     reset_state()
 
 
@@ -268,7 +347,19 @@ def test_armor_reduces_next_attack() -> None:
         json={"playerId": attacker.id, "action": "ATTACK", "targetPlayerId": target.id},
     )
     assert hit.status_code == 200
-    assert 73 <= target.health < 100  # armor should reduce the normal hit and then be consumed
+    target_choice = client.post(
+        "/api/action",
+        headers={"X-Player-Token": target.session_token},
+        json={"playerId": target.id, "action": "BATTLE_ATTACK"},
+    )
+    assert target_choice.status_code == 200
+    attacker_choice = client.post(
+        "/api/action",
+        headers={"X-Player-Token": attacker.session_token},
+        json={"playerId": attacker.id, "action": "BATTLE_ATTACK"},
+    )
+    assert attacker_choice.status_code == 200
+    assert 73 <= target.health < 100
     assert target.status_effect != "ARMORED"
     reset_state()
 
@@ -279,10 +370,17 @@ def test_manual_supply_drop_and_hazard_controls() -> None:
     supply = client.post(
         "/api/admin/action",
         headers=admin_header(),
-        json={"action": "SPAWN_SUPPLY_DROP", "targetZoneId": "zone_5"},
+        json={"action": "SPAWN_SUPPLY_DROP", "targetZoneId": "cornucopia"},
     )
     assert supply.status_code == 200
-    assert len(app.game.zone_items["zone_5"]) >= 1
+    assert len(app.game.zone_items["cornucopia"]) >= 1
+
+    invalid_supply = client.post(
+        "/api/admin/action",
+        headers=admin_header(),
+        json={"action": "SPAWN_SUPPLY_DROP", "targetZoneId": "zone_5"},
+    )
+    assert invalid_supply.status_code == 400
 
     hazard = client.post(
         "/api/admin/action",
@@ -331,10 +429,10 @@ def test_pause_and_resume_preserve_round() -> None:
 
 def test_two_hundred_players_can_register() -> None:
     reset_state()
-    for index in range(200):
+    for index in range(app.MAX_PLAYERS):
         response = client.post("/api/join", json={"name": f"Player {index + 1}"})
         assert response.status_code == 200
-    assert len(app.game.players) == 200
+    assert len(app.game.players) == app.MAX_PLAYERS
     response = client.post("/api/join", json={"name": "Overflow"})
     assert response.status_code == 409
     reset_state()
