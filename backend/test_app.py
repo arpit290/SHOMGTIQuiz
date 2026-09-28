@@ -250,6 +250,33 @@ def test_rest_and_cornucopia_grab_replace_search_and_hide() -> None:
     reset_state()
 
 
+def test_inventory_holds_one_item_and_grab_swaps_it() -> None:
+    reset_state()
+    joins, _ = start_small_game(["Arjun", "Rohan"])
+    player = app.game.players[joins[0]["player"]["id"]]
+    player.zone_id = "cornucopia"
+    pile = app.game.zone_items["cornucopia"]
+    pile.clear()
+    pile.extend([app.make_item("FOOD"), app.make_item("WEAPON")])
+    headers = {"X-Player-Token": player.session_token}
+
+    # The offered item is visible before committing.
+    assert app.player_state(player)["offeredItem"]["type"] == "FOOD"
+    first = client.post("/api/action", headers=headers, json={"playerId": player.id, "action": "GRAB_ITEM"})
+    assert first.status_code == 200
+    assert [i["type"] for i in player.inventory] == ["FOOD"]
+
+    # Bag is full: GRAB_ITEM is now a swap, and the old item returns to the pile.
+    player.action_taken = False
+    player.current_action = None
+    assert app.player_state(player)["offeredItem"]["type"] == "WEAPON"
+    swap = client.post("/api/action", headers=headers, json={"playerId": player.id, "action": "GRAB_ITEM"})
+    assert swap.status_code == 200
+    assert [i["type"] for i in player.inventory] == ["WEAPON"]
+    assert [i["type"] for i in pile] == ["FOOD"]
+    reset_state()
+
+
 def test_attack_engages_both_players_and_battle_actions_can_eliminate() -> None:
     reset_state()
     attacker_join, _ = start_small_game(["Attacker", "Target"])

@@ -84,6 +84,7 @@ export type PlayerGameState = {
   adjacentZones: Zone[]
   visibleOpponents: VisibleOpponent[]
   zoneLootCount: number
+  offeredItem: InventoryItem | null
   zoneHazard: boolean
   hazardDamage: number
   playerCount: number

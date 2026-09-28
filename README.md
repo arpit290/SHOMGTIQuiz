@@ -133,7 +133,7 @@ FINAL_PLAYER_THRESHOLD=20
 SUPPLY_DROP_INTERVAL=3
 HAZARD_INTERVAL=4
 HAZARD_DAMAGE=8
-MAX_INVENTORY=6
+MAX_INVENTORY=1
 ARENA_STATE_FILE=arena_state.json
 ```
 
@@ -157,3 +157,10 @@ The project intentionally remains an event-scale prototype rather than a product
 - **Attack** scales damage dealt. **Defense** passively scales damage taken (0.6x at +40%, 1.4x at -40%). **Agility** drives RUN escape chance and scales arena-hazard damage the same way defense scales hits. It replaces the old `speed` stat (the admin `speed` field is still accepted as an alias for `agility`; the Speed Boost item now grants +3 Agility).
 - **Player screen** is a single phone-sized screen: only HP is shown, with ACT / MOVE / BAG / FEED tabs.
 - **Live feed** only contains events the player did, that happened to them, or arena-wide notices (announcements, game start/pause/resume/over). Opponents' simultaneous battle choices are never leaked.
+
+## One-item bag, phone screen and Hunger Games theme (latest changes)
+
+- **One item at a time.** `MAX_INVENTORY` now defaults to `1`. At the Cornucopia the item you would receive is shown to you (`offeredItem` in the player state). With an empty hand `GRAB_ITEM` takes it; while holding something it becomes a **swap** (your item goes to the back of the pile, so nothing is lost or duplicated). Not pressing SWAP is the "keep" option. Using your item frees the slot.
+- **No tabs.** The player screen is a single phone-sized layout: zone + round + timer, an HP bar, your last result, the action buttons, an item box, a target picker, the Cornucopia offer (when there), every adjacent zone as a move button, and a live feed in the bottom third. It was checked in Chromium at 320x480 through 430x900 with no overflow or page scroll.
+- **Theme.** Everything except `/admin` is styled in a Hunger Games palette (charred black, Capitol gold, flame orange, ember red, arena green) via a `.hg` class that `Shell` puts on the page for non-admin routes. Admin styling is unchanged. Headings use a Trajan/Cinzel-style serif with system fallbacks.
+

@@ -29,7 +29,7 @@ FINAL_PLAYER_THRESHOLD = max(2, int(os.getenv("FINAL_PLAYER_THRESHOLD", "20")))
 SUPPLY_DROP_INTERVAL = max(1, int(os.getenv("SUPPLY_DROP_INTERVAL", "3")))
 HAZARD_INTERVAL = max(1, int(os.getenv("HAZARD_INTERVAL", "4")))
 HAZARD_DAMAGE = max(1, int(os.getenv("HAZARD_DAMAGE", "8")))
-MAX_INVENTORY = max(1, int(os.getenv("MAX_INVENTORY", "6")))
+MAX_INVENTORY = max(1, int(os.getenv("MAX_INVENTORY", "1")))
 STATE_FILE = Path(os.getenv("ARENA_STATE_FILE", "arena_state.json"))
 
 # Player stat system: every player picks exactly one HIGH, one MID and one LOW
@@ -644,7 +644,8 @@ def available_actions(player: Player) -> list[str]:
         actions.add("ATTACK")
     if player.inventory:
         actions.add("USE_ITEM")
-    if player.zone_id == "cornucopia" and game.zone_items["cornucopia"] and len(player.inventory) < MAX_INVENTORY:
+    if player.zone_id == "cornucopia" and game.zone_items["cornucopia"]:
+        # With a full bag, GRAB_ITEM becomes a swap: the held item goes back on the pile.
         actions.add("GRAB_ITEM")
     return sorted(actions)
 
@@ -681,6 +682,11 @@ def player_state(player: Player) -> dict[str, Any]:
         "adjacentZones": [public_zone_dict(ZONES[zone_id]) for zone_id in ZONES[player.zone_id].connected_zones],
         "visibleOpponents": visible_opponent_dict(player),
         "zoneLootCount": len(game.zone_items[player.zone_id]),
+        "offeredItem": (
+            game.zone_items["cornucopia"][0].dict()
+            if player.zone_id == "cornucopia" and game.zone_items["cornucopia"]
+            else None
+        ),
         "zoneHazard": player.zone_id in game.hazard_zones,
         "hazardDamage": hazard_damage_for(player),
         "playerCount": len(game.players),
@@ -872,6 +878,8 @@ def _restore_from_checkpoint() -> None:
             if player.zone_id not in ZONES:
                 player.zone_id = "zone_1"
             for item_data in data.get("inventory", []):
+                if len(player.inventory) >= MAX_INVENTORY:
+                    break  # checkpoints from before the one-item rule may hold more
                 item_type = item_data.get("type")
                 if item_type in ITEM_DEFINITIONS:
                     definition = ITEM_DEFINITIONS[item_type]
@@ -1232,8 +1240,6 @@ def _validate_player_action_locked(
             return False, "You can only grab items at the Cornucopia."
         if not game.zone_items["cornucopia"]:
             return False, "The Cornucopia is empty."
-        if len(player.inventory) >= MAX_INVENTORY:
-            return False, "Your inventory is full."
 
     if action == "USE_ITEM":
         if not item_id:
@@ -1452,16 +1458,22 @@ def _use_item_locked(player: Player, item_id: str) -> dict[str, Any]:
 
 
 def _grab_item_locked(player: Player) -> dict[str, Any]:
+    """Take the offered Cornucopia item, or swap it for the item you are holding."""
     if player.zone_id != "cornucopia":
         raise HTTPException(status_code=409, detail="Items can only be collected at the Cornucopia.")
-    if len(player.inventory) >= MAX_INVENTORY:
-        player.last_result = f"Your inventory is full ({MAX_INVENTORY} items)."
-        raise HTTPException(status_code=409, detail="Your inventory is full.")
     if not game.zone_items["cornucopia"]:
         player.last_result = "The Cornucopia is empty."
         raise HTTPException(status_code=409, detail="The Cornucopia is empty.")
 
     item = game.zone_items["cornucopia"].pop(0)
+    if len(player.inventory) >= MAX_INVENTORY:
+        dropped = player.inventory.pop(0)
+        game.zone_items["cornucopia"].append(dropped)  # goes to the back of the pile
+        player.inventory.append(item)
+        player.last_result = f"You swapped your {dropped.name} for a {item.name}. {item.description}"
+        message = f"{player.name} swapped a {dropped.name} for a {item.name} at the Cornucopia."
+        return game.add_event(message, "ITEM_SWAPPED", player_ids=(player.id,))
+
     player.inventory.append(item)
     player.last_result = f"You grabbed a {item.name}. {item.description}"
     return game.add_event(f"{player.name} grabbed a {item.name} from the Cornucopia.", "ITEM_GRABBED", player_ids=(player.id,))

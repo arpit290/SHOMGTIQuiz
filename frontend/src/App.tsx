@@ -12,12 +12,35 @@ const SPECTATE_STORAGE_KEY = 'arena_spectate_token'
 
 type StoredSession = { player: Player; sessionToken: string }
 
-function Shell({ children }: { children: ReactNode }) {
+function Emblem({ size = 28, className = '' }: { size?: number; className?: string }) {
   return (
-    <div className="app-shell">
+    <svg className={`emblem ${className}`} width={size} height={size} viewBox="0 0 100 100" role="img" aria-label="The Arena emblem">
+      <defs>
+        <linearGradient id="emb-gold" x1="0" y1="0" x2="0" y2="1">
+          <stop offset="0" stopColor="#f6d774" /><stop offset="1" stopColor="#b8801a" />
+        </linearGradient>
+        <linearGradient id="emb-fire" x1="0" y1="1" x2="0" y2="0">
+          <stop offset="0" stopColor="#c81d25" /><stop offset=".55" stopColor="#ff6a1a" /><stop offset="1" stopColor="#ffd25a" />
+        </linearGradient>
+      </defs>
+      <circle cx="50" cy="50" r="46" fill="none" stroke="url(#emb-gold)" strokeWidth="5" />
+      <circle cx="50" cy="50" r="38" fill="#120d0a" stroke="url(#emb-gold)" strokeWidth="1.5" />
+      <path d="M50 14c3 15 21 22 19 43-1 15-10 25-19 27-9-2-18-12-19-27-1-11 6-17 9-26 4 5 7 3 10-17z" fill="url(#emb-fire)" />
+      <path d="M50 46c2 8 11 12 10 23-1 7-5 11-10 12-5-1-9-5-10-12-1-7 5-9 6-15 3 3 4 1 4-8z" fill="#fff1b8" opacity=".85" />
+      <path d="M8 62 L92 38" stroke="url(#emb-gold)" strokeWidth="2.5" strokeLinecap="round" opacity=".9" />
+      <path d="M92 38 L82 36 M92 38 L85 46" stroke="url(#emb-gold)" strokeWidth="2.5" strokeLinecap="round" />
+    </svg>
+  )
+}
+
+function Shell({ children }: { children: ReactNode }) {
+  const { pathname } = useLocation()
+  const themed = !pathname.startsWith('/admin')
+  return (
+    <div className={`app-shell ${themed ? 'hg' : ''}`}>
       <header className="topbar">
-        <Link to="/" className="brand">THE ARENA</Link>
-      <nav><Link to="/">Arena</Link></nav>
+        <Link to="/" className="brand">{themed && <Emblem size={26} />}THE ARENA</Link>
+        <nav><Link to="/">Arena</Link></nav>
       </header>
       <main>{children}</main>
     </div>
@@ -53,12 +76,14 @@ function LandingPage() {
     <>
       <ExistingSessionRedirect />
       <section className="hero panel">
-      <p className="eyebrow">COLLEGE EVENT // ONE SHARED ARENA</p>
+      <Emblem size={104} className="hero-emblem" />
+      <p className="eyebrow">TRIBUTES OF THE COLLEGE // ONE SHARED ARENA</p>
       <h1>THE<br />ARENA</h1>
-      <p className="hero-copy">A text-first survival game. Enter your name, make your choices, and survive the rounds.</p>
+      <p className="hero-copy">Volunteer as tribute. Choose your strengths, make your moves, and be the last one standing.</p>
       <div className="button-row">
-        <Link className="button button-primary" to="/join">ENTER THE ARENA</Link>
+        <Link className="button button-primary" to="/join">VOLUNTEER AS TRIBUTE</Link>
       </div>
+      <p className="hero-motto">MAY THE ODDS BE EVER IN YOUR FAVOR</p>
       </section>
     </>
   )
@@ -137,9 +162,9 @@ function JoinPage() {
       <section className="narrow panel">
         {step === 'NAME' ? (
           <>
-            <p className="eyebrow">PLAYER REGISTRATION</p>
-            <h2>ENTER YOUR NAME</h2>
-            <p className="muted">One name per participant. Registration closes when the admin starts the game.</p>
+            <p className="eyebrow">THE REAPING // TRIBUTE REGISTRATION</p>
+            <h2>NAME YOUR TRIBUTE</h2>
+            <p className="muted">One name per participant. The reaping closes when the Gamemakers start the game.</p>
             <form onSubmit={handleNameSubmit} className="stack">
               <input autoFocus maxLength={32} value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name" />
               <button disabled={!name.trim()} className="button button-primary" type="submit">CONTINUE</button>
@@ -148,7 +173,7 @@ function JoinPage() {
         ) : (
           <div className="stat-picker">
             <p className="eyebrow">STEP 2 // {name.trim().toUpperCase()}</p>
-            <h2>CHOOSE YOUR STATS</h2>
+            <h2>CHOOSE YOUR STRENGTHS</h2>
             <p className="muted">Give one stat <strong>HIGH</strong>, one <strong>MID</strong> and one <strong>LOW</strong>. HIGH is 40% above baseline, LOW is 40% below. A small random tweak is added so no two players are identical.</p>
             {STAT_ROWS.map((row) => (
               <div key={row.key} className="stat-pick-row">
@@ -186,7 +211,7 @@ function EventFeed({ events, compact = false }: { events: GameEvent[]; compact?:
     <div className={`event-feed ${compact ? 'compact' : ''}`}>
       <div className="section-heading">LIVE FEED</div>
       {events.length === 0 ? <p className="muted">No events yet.</p> : events.slice().reverse().map((event) => (
-        <div key={event.id} className="event-item">
+        <div key={event.id} className={`event-item t-${event.type}`}>
           <span className="event-time">{new Date(event.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })}</span>
           <span>{event.message}</span>
         </div>
@@ -289,7 +314,7 @@ function PlayerLobby() {
       </div>
       <div className="waiting-panel">
         <div className="loading-dot" />
-        <div><strong>Waiting for the admin to start the game.</strong><p className="muted">Once the game begins, your zone, inventory, and first timed round will appear here.</p></div>
+        <div><strong>Waiting for the Gamemakers to open the arena.</strong><p className="muted">Once the games begin, your zone, supplies and first timed round will appear here.</p></div>
       </div>
       <EventFeed events={state.events} />
     </section>
@@ -339,7 +364,13 @@ function Stat({ label, value }: { label: string; value: string }) {
   return <div className="stat"><span>{label}</span><strong>{value}</strong></div>
 }
 
-type PlayTab = 'ACT' | 'MOVE' | 'ITEMS' | 'FEED'
+const ITEM_BLURB: Record<string, string> = {
+  MEDKIT: '+30 HP',
+  FOOD: '+12 HP',
+  WEAPON: '+3 ATK',
+  ARMOR: 'blocks 8 dmg',
+  SPEED_BOOST: '+3 AGI',
+}
 
 function HpBar({ player }: { player: Player }) {
   const pct = Math.max(0, Math.min(100, (player.health / player.maxHealth) * 100))
@@ -361,9 +392,9 @@ function BattlePanel({ battle, opponentName, serverNow, durationSeconds, disable
   onAction: (action: string) => void
 }) {
   const options = [
-    { id: 'BATTLE_ATTACK', label: 'ATTACK', detail: 'Hit them' },
-    { id: 'BATTLE_DEFEND', label: 'DEFEND', detail: 'Take less damage' },
-    { id: 'BATTLE_RUN', label: 'RUN', detail: 'Try to escape' },
+    { id: 'BATTLE_ATTACK', label: 'ATTACK', detail: 'Strike', tone: 'atk' },
+    { id: 'BATTLE_DEFEND', label: 'DEFEND', detail: 'Brace', tone: 'def' },
+    { id: 'BATTLE_RUN', label: 'RUN', detail: 'Escape', tone: 'run' },
   ]
   return (
     <div className="pg-battle">
@@ -376,7 +407,7 @@ function BattlePanel({ battle, opponentName, serverNow, durationSeconds, disable
       </div>
       <div className="pg-battle-actions">
         {options.map((option) => (
-          <button key={option.id} className={`pg-btn battle ${battle.yourAction === option.id ? 'selected' : ''}`} disabled={disabled} onClick={() => onAction(option.id)}>
+          <button key={option.id} className={`pg-btn battle ${option.tone} ${battle.yourAction === option.id ? 'selected' : ''}`} disabled={disabled} onClick={() => onAction(option.id)}>
             <strong>{option.label}</strong><small>{option.detail}</small>
           </button>
         ))}
@@ -393,15 +424,10 @@ function PlayerGame() {
   const { state, error, connectionStatus } = usePlayerSocket()
   const [actionError, setActionError] = useState('')
   const [submitting, setSubmitting] = useState(false)
-  const [tab, setTab] = useState<PlayTab>('ACT')
   const [targetId, setTargetId] = useState('')
-  const inBattle = Boolean(state?.battle)
-
-  // Battles take over the action tab; clear stale errors when a new round starts.
-  useEffect(() => { if (inBattle) setTab('ACT') }, [inBattle])
-  useEffect(() => { setActionError('') }, [state?.round])
 
   const opponents = state?.visibleOpponents ?? []
+  useEffect(() => { setActionError('') }, [state?.round])
   useEffect(() => {
     if (!opponents.some((opponent) => opponent.id === targetId)) setTargetId(opponents[0]?.id ?? '')
   }, [opponents, targetId])
@@ -412,8 +438,10 @@ function PlayerGame() {
   const isFinished = state.status === 'GAME_OVER'
   const isPaused = state.status === 'PAUSED'
   const playable = state.status === 'ACTIVE' && player.alive && !player.actionTaken && !state.battle
-  const inPlay = player.alive && !isFinished && !isPaused
   const can = (action: string) => playable && !submitting && state.availableActions.includes(action)
+  const held = player.inventory[0]
+  const offered = state.offeredItem
+  const chosen = player.currentAction
 
   async function doAction(action: string, options?: { targetZoneId?: string; targetPlayerId?: string; itemId?: string }) {
     const raw = localStorage.getItem(PLAYER_STORAGE_KEY)
@@ -423,7 +451,6 @@ function PlayerGame() {
     setSubmitting(true)
     try {
       await submitAction(session.sessionToken, session.player.id, action, options?.targetZoneId, options?.targetPlayerId, options?.itemId)
-      if (!action.startsWith('BATTLE_')) setTab('ACT')
     } catch (err) {
       setActionError(err instanceof Error ? err.message : 'Action failed')
     } finally {
@@ -432,46 +459,16 @@ function PlayerGame() {
   }
 
   const opponentName = opponents.find((opponent) => opponent.id === player.battleOpponentId)?.name ?? 'your opponent'
-  const lockedLabel = player.currentAction ? player.currentAction.replace('BATTLE_', '').replace('_', ' ') : 'DONE'
 
-  let body: ReactNode
+  let controls: ReactNode
   if (!player.alive) {
-    body = <div className="pg-card end"><span className="pg-eyebrow">ELIMINATED</span><strong>The arena has claimed you.</strong><p>{player.lastResult}</p></div>
+    controls = <div className="pg-card end"><span className="pg-eyebrow">A CANNON SOUNDS</span><strong>You have fallen.</strong><p>{player.lastResult}</p></div>
   } else if (isFinished) {
-    body = <div className="pg-card end"><span className="pg-eyebrow">GAME OVER</span><strong>{state.winnerId === player.id ? 'YOU SURVIVED.' : 'THE ARENA IS CLOSED.'}</strong><p>{player.lastResult}</p></div>
+    controls = <div className="pg-card victor"><span className="pg-eyebrow">GAME OVER</span><strong>{state.winnerId === player.id ? 'VICTOR OF THE ARENA.' : 'THE GAMES HAVE ENDED.'}</strong><p>{player.lastResult}</p></div>
   } else if (isPaused) {
-    body = <div className="pg-card"><span className="pg-eyebrow">PAUSED</span><strong>Stand by.</strong><p>The admin paused the arena. Your timer is frozen.</p></div>
-  } else if (tab === 'FEED') {
-    body = <EventFeed events={state.events} compact />
-  } else if (tab === 'MOVE') {
-    body = (
-      <div className="pg-section">
-        <span className="pg-eyebrow">MOVE TO</span>
-        <div className="pg-move-grid">
-          {state.adjacentZones.map((zone) => (
-            <button key={zone.id} className="pg-btn" disabled={!can('MOVE')} onClick={() => void doAction('MOVE', { targetZoneId: zone.id })}>{zone.name}</button>
-          ))}
-        </div>
-      </div>
-    )
-  } else if (tab === 'ITEMS') {
-    body = (
-      <div className="pg-section">
-        <span className="pg-eyebrow">BAG · {player.inventory.length}</span>
-        {player.inventory.length === 0 ? <p className="pg-note">Empty. Grab supplies at the Cornucopia.</p> : (
-          <div className="pg-items">
-            {player.inventory.map((item: InventoryItem) => (
-              <div key={item.id} className="pg-item">
-                <div><strong>{item.name}</strong><small>{item.description}</small></div>
-                <button className="pg-btn small" disabled={!can('USE_ITEM')} onClick={() => void doAction('USE_ITEM', { itemId: item.id })}>USE</button>
-              </div>
-            ))}
-          </div>
-        )}
-      </div>
-    )
+    controls = <div className="pg-card"><span className="pg-eyebrow">PAUSED</span><strong>Stand by.</strong><p>The Gamemakers paused the arena. Your timer is frozen.</p></div>
   } else if (state.battle) {
-    body = (
+    controls = (
       <BattlePanel
         battle={state.battle}
         opponentName={opponentName}
@@ -481,32 +478,59 @@ function PlayerGame() {
         onAction={(action) => void doAction(action)}
       />
     )
-  } else if (player.actionTaken) {
-    body = <div className="pg-card"><span className="pg-eyebrow">LOCKED IN</span><strong>{lockedLabel}</strong><p>Waiting for the round to end.</p></div>
   } else {
-    body = (
-      <div className="pg-section">
-        <div className="pg-action-grid">
+    controls = (
+      <>
+        <div className="pg-actions">
           {(['REST', 'SCOUT', 'WAIT'] as const).map((action) => (
-            <button key={action} className="pg-btn" disabled={!can(action)} onClick={() => void doAction(action)}>{action}</button>
+            <button key={action} className={`pg-btn ${chosen === action ? 'selected' : ''}`} disabled={!can(action)} onClick={() => void doAction(action)}>{action}</button>
           ))}
-          {state.availableActions.includes('GRAB_ITEM') && <button className="pg-btn grab" disabled={!can('GRAB_ITEM')} onClick={() => void doAction('GRAB_ITEM')}>GRAB ITEM</button>}
         </div>
-        <span className="pg-eyebrow">IN YOUR ZONE · {opponents.length}</span>
-        {opponents.length === 0 ? <p className="pg-note">No one else is here.</p> : (
-          <div className="pg-attack-row">
-            <select value={targetId} onChange={(e) => setTargetId(e.target.value)} disabled={!can('ATTACK')}>
-              {opponents.map((opponent: VisibleOpponent) => <option key={opponent.id} value={opponent.id}>{opponent.name} · {opponent.health}/{opponent.maxHealth}</option>)}
-            </select>
-            <button className="pg-btn danger" disabled={!can('ATTACK') || !targetId} onClick={() => void doAction('ATTACK', { targetPlayerId: targetId })}>ATTACK</button>
+
+        <div className={`pg-box ${held ? '' : 'empty'}`}>
+          <div className="pg-box-text">
+            <span className="pg-eyebrow">ITEM</span>
+            {held ? <strong>{held.name} <small>{ITEM_BLURB[held.type] ?? ''}</small></strong> : <strong className="dim">Empty hands</strong>}
+          </div>
+          {held && <button className={`pg-btn small ${chosen === 'USE_ITEM' ? 'selected' : ''}`} disabled={!can('USE_ITEM')} onClick={() => void doAction('USE_ITEM', { itemId: held.id })}>USE</button>}
+        </div>
+
+        <div className={`pg-box foes ${opponents.length === 0 ? 'alone' : ''}`}>
+          <span className="pg-eyebrow">IN YOUR ZONE · {opponents.length}</span>
+          {opponents.length === 0 ? <strong className="dim">Alone here</strong> : (
+            <div className="pg-attack-row">
+              <select value={targetId} onChange={(e) => setTargetId(e.target.value)} disabled={!can('ATTACK')}>
+                {opponents.map((opponent: VisibleOpponent) => <option key={opponent.id} value={opponent.id}>{opponent.name} · {opponent.health} HP</option>)}
+              </select>
+              <button className="pg-btn danger small" disabled={!can('ATTACK') || !targetId} onClick={() => void doAction('ATTACK', { targetPlayerId: targetId })}>ATTACK</button>
+            </div>
+          )}
+        </div>
+
+        {offered && (
+          <div className="pg-offer">
+            <div className="pg-box-text">
+              <span className="pg-eyebrow">{held ? 'SWAP OR KEEP YOURS' : 'CORNUCOPIA'}</span>
+              <strong>{offered.name} <small>{ITEM_BLURB[offered.type] ?? ''}</small></strong>
+            </div>
+            <button className={`pg-btn small grab ${chosen === 'GRAB_ITEM' ? 'selected' : ''}`} disabled={!can('GRAB_ITEM')} onClick={() => void doAction('GRAB_ITEM')}>{held ? 'SWAP' : 'TAKE'}</button>
           </div>
         )}
-      </div>
+
+        <div className="pg-move">
+          <span className="pg-eyebrow">MOVE TO</span>
+          <div className={`pg-move-grid ${state.adjacentZones.length > 4 ? 'many' : ''}`}>
+            {state.adjacentZones.map((zone) => (
+              <button key={zone.id} className="pg-btn move" disabled={!can('MOVE')} onClick={() => void doAction('MOVE', { targetZoneId: zone.id })}>{zone.name}</button>
+            ))}
+          </div>
+        </div>
+      </>
     )
   }
 
   return (
-    <div className="pg">
+    <div className={`pg ${player.alive && !isFinished && !isPaused ? 'capped' : ''}`}>
       <header className="pg-head">
         <div className="pg-zone">
           <span className="pg-eyebrow">ROUND {state.round} · {state.phase} · {state.aliveCount} ALIVE</span>
@@ -521,20 +545,10 @@ function PlayerGame() {
       {state.zoneHazard && player.alive && !isFinished && <div className="pg-alert">HAZARD ZONE · −{state.hazardDamage} HP at round end</div>}
       <p className="pg-status">{player.lastResult}</p>
 
-      <main className="pg-body">{body}</main>
-
+      <div className="pg-controls">{controls}</div>
       {actionError && <div className="pg-error" role="alert">{actionError}</div>}
 
-      {inPlay ? (
-        <nav className="pg-tabs">
-          <button className={tab === 'ACT' ? 'active' : ''} onClick={() => setTab('ACT')}>ACT</button>
-          <button className={tab === 'MOVE' ? 'active' : ''} disabled={inBattle} onClick={() => setTab('MOVE')}>MOVE</button>
-          <button className={tab === 'ITEMS' ? 'active' : ''} disabled={inBattle} onClick={() => setTab('ITEMS')}>BAG{player.inventory.length > 0 ? ` ${player.inventory.length}` : ''}</button>
-          <button className={tab === 'FEED' ? 'active' : ''} onClick={() => setTab('FEED')}>FEED</button>
-        </nav>
-      ) : (
-        <div className="pg-feed-mini"><EventFeed events={state.events} compact /></div>
-      )}
+      <section className="pg-feed"><EventFeed events={state.events} compact /></section>
     </div>
   )
 }
