@@ -32,7 +32,8 @@ export type Player = {
   health: number
   maxHealth: number
   attack: number
-  speed: number
+  defense: number
+  agility: number
   zoneId: string
   zoneName: string
   alive: boolean

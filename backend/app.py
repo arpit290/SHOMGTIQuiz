@@ -10,7 +10,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from enum import Enum
-from typing import Any
+from typing import Any, Iterable, Literal
 
 from fastapi import FastAPI, Header, HTTPException, WebSocket, WebSocketDisconnect, status
 from fastapi.middleware.cors import CORSMiddleware
@@ -31,6 +31,14 @@ HAZARD_INTERVAL = max(1, int(os.getenv("HAZARD_INTERVAL", "4")))
 HAZARD_DAMAGE = max(1, int(os.getenv("HAZARD_DAMAGE", "8")))
 MAX_INVENTORY = max(1, int(os.getenv("MAX_INVENTORY", "6")))
 STATE_FILE = Path(os.getenv("ARENA_STATE_FILE", "arena_state.json"))
+
+# Player stat system: every player picks exactly one HIGH, one MID and one LOW
+# across attack / defense / agility. MID is the baseline, HIGH/LOW are +/-40%,
+# and a tiny random multiplier keeps two players' stats from being identical.
+STAT_BASELINE = 10.0
+STAT_LEVEL_MULTIPLIERS = {"HIGH": 1.4, "MID": 1.0, "LOW": 0.6}
+STAT_JITTER = float(os.getenv("STAT_JITTER", "0.04"))  # +/-4% by default
+STAT_NAMES = ("attack", "defense", "agility")
 
 rng = random.Random()
 
@@ -104,7 +112,7 @@ ITEM_DEFINITIONS: dict[str, ItemDefinition] = {
     "FOOD": ItemDefinition("FOOD", "Food", "Restore 12 health."),
     "WEAPON": ItemDefinition("WEAPON", "Weapon", "Use once to permanently gain +3 Attack."),
     "ARMOR": ItemDefinition("ARMOR", "Armor", "Use to become Armored until your next round; the next hit against you is reduced by 8 damage."),
-    "SPEED_BOOST": ItemDefinition("SPEED_BOOST", "Speed Boost", "Use once to permanently gain +3 Speed."),
+    "SPEED_BOOST": ItemDefinition("SPEED_BOOST", "Agility Boost", "Use once to permanently gain +3 Agility."),
 }
 
 
@@ -163,8 +171,12 @@ class Player:
     name: str
     health: int = 100
     max_health: int = 100
-    attack: int = 10
-    speed: int = 10
+    attack: float = STAT_BASELINE
+    defense: float = STAT_BASELINE
+    agility: float = STAT_BASELINE
+    base_attack: float = STAT_BASELINE
+    base_defense: float = STAT_BASELINE
+    base_agility: float = STAT_BASELINE
     zone_id: str = "zone_1"
     alive: bool = True
     connected: bool = False
@@ -192,7 +204,8 @@ class Player:
             "health": self.health,
             "maxHealth": self.max_health,
             "attack": self.attack,
-            "speed": self.speed,
+            "defense": self.defense,
+            "agility": self.agility,
             "zoneId": self.zone_id,
             "zoneName": ZONES[self.zone_id].name,
             "alive": self.alive,
@@ -212,6 +225,9 @@ class Player:
     def admin_dict(self) -> dict[str, Any]:
         return {
             **self.public_dict(),
+            "baseAttack": self.base_attack,
+            "baseDefense": self.base_defense,
+            "baseAgility": self.base_agility,
             "joinedAt": self.joined_at,
         }
 
@@ -243,12 +259,28 @@ class GameState:
                 counts[player.zone_id] += 1
         return counts
 
-    def add_event(self, message: str, event_type: str = "INFO") -> dict[str, Any]:
+    def add_event(
+        self,
+        message: str,
+        event_type: str = "INFO",
+        *,
+        player_ids: Iterable[str] = (),
+        broadcast: bool = False,
+    ) -> dict[str, Any]:
+        """Append to the event log.
+
+        `player_ids` lists the players an event is about (doing it, or having it
+        done to them); only those players see it in their live feed.
+        `broadcast=True` is reserved for arena-wide notices every player should see
+        (announcements, game start / pause / resume / over).
+        """
         event = {
             "id": secrets.token_hex(6),
             "timestamp": datetime.now(timezone.utc).isoformat(),
             "type": event_type,
             "message": message,
+            "playerIds": sorted(set(player_ids)),
+            "broadcast": broadcast,
         }
         self.event_log.append(event)
         if len(self.event_log) > 2000:
@@ -420,8 +452,18 @@ app.add_middleware(
 # Request schemas
 # ---------------------------------------------------------------------------
 
+StatLevel = Literal["HIGH", "MID", "LOW"]
+
+
+class StatChoice(BaseModel):
+    attack: StatLevel
+    defense: StatLevel
+    agility: StatLevel
+
+
 class JoinRequest(BaseModel):
     name: str = Field(min_length=1, max_length=32)
+    stats: StatChoice | None = None
 
 
 class AdminLoginRequest(BaseModel):
@@ -436,8 +478,10 @@ class AdminActionRequest(BaseModel):
     message: str | None = Field(default=None, max_length=240)
     reason: str | None = Field(default=None, max_length=160)
     value: int | None = Field(default=None, ge=0, le=500)
-    attack: int | None = Field(default=None, ge=1, le=100)
-    speed: int | None = Field(default=None, ge=1, le=100)
+    attack: float | None = Field(default=None, ge=1, le=100)
+    defense: float | None = Field(default=None, ge=1, le=100)
+    agility: float | None = Field(default=None, ge=1, le=100)
+    speed: float | None = Field(default=None, ge=1, le=100)  # legacy alias for agility
 
 
 class PlayerActionRequest(BaseModel):
@@ -454,6 +498,53 @@ class PlayerActionRequest(BaseModel):
 
 ACTION_SET = {"MOVE", "REST", "SCOUT", "ATTACK", "USE_ITEM", "WAIT", "GRAB_ITEM"}
 BATTLE_ACTION_SET = {"BATTLE_ATTACK", "BATTLE_DEFEND", "BATTLE_RUN"}
+
+
+def event_visible_to(event: dict[str, Any], player_id: str) -> bool:
+    return bool(event.get("broadcast")) or player_id in (event.get("playerIds") or ())
+
+
+def player_feed(player_id: str, limit: int = 30) -> list[dict[str, Any]]:
+    """The live feed for one player: only events they did, or that happened to them."""
+    feed: list[dict[str, Any]] = []
+    for event in reversed(game.event_log):
+        if event_visible_to(event, player_id):
+            feed.append({
+                "id": event["id"],
+                "timestamp": event["timestamp"],
+                "type": event["type"],
+                "message": event["message"],
+            })
+            if len(feed) >= limit:
+                break
+    feed.reverse()
+    return feed
+
+
+def mitigation_multiplier(stat: float) -> float:
+    """Damage multiplier from a defensive stat: 1.0 at baseline, 0.6 at +40%, 1.4 at -40%."""
+    return max(0.3, min(1.7, 2.0 - stat / STAT_BASELINE))
+
+
+def hazard_damage_for(player: Player) -> int:
+    """Zone effects are softened (or worsened) by agility."""
+    return max(1, int(round(HAZARD_DAMAGE * mitigation_multiplier(player.agility))))
+
+
+def roll_stat(level: str) -> float:
+    jitter = rng.uniform(1.0 - STAT_JITTER, 1.0 + STAT_JITTER)
+    return round(STAT_BASELINE * STAT_LEVEL_MULTIPLIERS[level] * jitter, 2)
+
+
+def resolve_stat_choice(choice: "StatChoice | None") -> dict[str, str]:
+    if choice is None:
+        levels = ["HIGH", "MID", "LOW"]
+        rng.shuffle(levels)
+        return dict(zip(STAT_NAMES, levels))
+    picked = {name: getattr(choice, name) for name in STAT_NAMES}
+    if sorted(picked.values()) != ["HIGH", "LOW", "MID"]:
+        raise HTTPException(status_code=400, detail="Choose exactly one HIGH, one MID and one LOW stat.")
+    return picked
 
 
 def clean_name(name: str) -> str:
@@ -591,12 +682,12 @@ def player_state(player: Player) -> dict[str, Any]:
         "visibleOpponents": visible_opponent_dict(player),
         "zoneLootCount": len(game.zone_items[player.zone_id]),
         "zoneHazard": player.zone_id in game.hazard_zones,
-        "hazardDamage": HAZARD_DAMAGE,
+        "hazardDamage": hazard_damage_for(player),
         "playerCount": len(game.players),
         "aliveCount": game.alive_count,
         "maxPlayers": MAX_PLAYERS,
         "winnerId": game.winner_id,
-        "events": game.event_log[-30:],
+        "events": player_feed(player.id),
         "battle": battle_dict(battle, viewer_id=player.id),
     }
 
@@ -757,8 +848,12 @@ def _restore_from_checkpoint() -> None:
                 name=str(data["name"]),
                 health=int(data.get("health", 100)),
                 max_health=int(data.get("maxHealth", 100)),
-                attack=int(data.get("attack", 10)),
-                speed=int(data.get("speed", 10)),
+                attack=float(data.get("attack", STAT_BASELINE)),
+                defense=float(data.get("defense", STAT_BASELINE)),
+                agility=float(data.get("agility", data.get("speed", STAT_BASELINE))),
+                base_attack=float(data.get("baseAttack", data.get("attack", STAT_BASELINE))),
+                base_defense=float(data.get("baseDefense", data.get("defense", STAT_BASELINE))),
+                base_agility=float(data.get("baseAgility", data.get("agility", data.get("speed", STAT_BASELINE)))),
                 zone_id=str(data.get("zoneId", "zone_1")),
                 alive=bool(data.get("alive", True)),
                 connected=False,
@@ -853,8 +948,9 @@ def assign_starting_zones_locked() -> None:
     for index, player in enumerate(game.players.values()):
         player.zone_id = OUTER_ZONE_IDS[index % len(OUTER_ZONE_IDS)]
         player.health = player.max_health
-        player.attack = 10
-        player.speed = 10
+        player.attack = player.base_attack
+        player.defense = player.base_defense
+        player.agility = player.base_agility
         player.alive = True
         player.action_taken = False
         player.current_action = None
@@ -978,7 +1074,7 @@ def _end_battle_locked(battle_id: str, *, reason: str | None = None) -> None:
     ended_action_round = game.round_number == battle.started_round
     _clear_battle_players_locked(battle, ended_action_round=ended_action_round)
     if reason:
-        game.add_event(reason, "BATTLE_ENDED")
+        game.add_event(reason, "BATTLE_ENDED", player_ids=battle.participant_ids())
 
 
 def _finish_game_locked() -> None:
@@ -986,10 +1082,10 @@ def _finish_game_locked() -> None:
     if len(alive_players) == 1:
         game.winner_id = alive_players[0].id
         alive_players[0].last_result = "You are the last player standing."
-        game.add_event(f"{alive_players[0].name} is the last player standing.", "GAME_OVER")
+        game.add_event(f"{alive_players[0].name} is the last player standing.", "GAME_OVER", broadcast=True)
     else:
         game.winner_id = None
-        game.add_event("The game has ended with no player left standing.", "GAME_OVER")
+        game.add_event("The game has ended with no player left standing.", "GAME_OVER", broadcast=True)
     game.status = GameStatus.GAME_OVER
     game.phase = GamePhase.GAME_OVER
     game.round_deadline = None
@@ -1007,7 +1103,7 @@ def _finish_game_locked() -> None:
 
 def _eliminate_player_locked(player: Player, reason: str, *, killer: Player | None = None) -> dict[str, Any]:
     if not player.alive:
-        return game.add_event(f"{player.name} was already eliminated.", "INFO")
+        return game.add_event(f"{player.name} was already eliminated.", "INFO", player_ids=(player.id,))
     player.alive = False
     player.health = 0
     player.action_deadline = None
@@ -1022,7 +1118,8 @@ def _eliminate_player_locked(player: Player, reason: str, *, killer: Player | No
         )
     if killer is not None and killer.id != player.id:
         killer.kills += 1
-    return game.add_event(reason, "PLAYER_ELIMINATED")
+    involved = [player.id] + ([killer.id] if killer is not None else [])
+    return game.add_event(reason, "PLAYER_ELIMINATED", player_ids=involved)
 
 
 def _apply_hazard_damage_locked() -> list[dict[str, Any]]:
@@ -1034,11 +1131,12 @@ def _apply_hazard_damage_locked() -> list[dict[str, Any]]:
         if not player.alive or player.zone_id not in game.hazard_zones:
             continue
         old_health = player.health
-        player.health = max(0, player.health - HAZARD_DAMAGE)
+        player.health = max(0, player.health - hazard_damage_for(player))
         player.last_result = f"The hazard in {ZONES[player.zone_id].name} dealt {old_health - player.health} damage."
         events.append(game.add_event(
             f"{player.name} took {old_health - player.health} hazard damage in {ZONES[player.zone_id].name}.",
             "HAZARD_DAMAGE",
+            player_ids=(player.id,),
         ))
         if player.health <= 0:
             events.append(_eliminate_player_locked(
@@ -1152,11 +1250,13 @@ def _validate_player_action_locked(
 
 
 def _attack_damage_locked(attacker: Player, defender: Player, *, defense: bool = False) -> tuple[int, bool, int]:
-    speed_edge = max(-3, min(6, (attacker.speed - defender.speed) // 3))
-    raw = max(1, attacker.attack + rng.randint(-2, 4) + speed_edge)
+    raw = max(1, int(round(attacker.attack)) + rng.randint(-2, 4))
     critical = rng.random() < 0.12
     if critical:
-        raw += max(3, attacker.attack // 2)
+        raw += max(3, int(attacker.attack // 2))
+
+    # The defender's DEFENSE stat passively mitigates every incoming hit.
+    raw = max(1, int(round(raw * mitigation_multiplier(defender.defense))))
 
     reduction = 0
     if defense:
@@ -1180,18 +1280,21 @@ def _resolve_battle_turn_locked(battle: Battle) -> list[dict[str, Any]]:
     if not action_a or not action_b:
         return []
 
+    def _log(message: str, event_type: str = "INFO") -> dict[str, Any]:
+        return game.add_event(message, event_type, player_ids=(player_a.id, player_b.id))
+
     events: list[dict[str, Any]] = []
     if action_a == "BATTLE_RUN" or action_b == "BATTLE_RUN":
         runners = [(player_a, player_b, action_a), (player_b, player_a, action_b)]
         for runner, opponent, runner_action in runners:
             if runner_action != "BATTLE_RUN":
                 continue
-            chance = max(0.20, min(0.85, 0.50 + (runner.speed - opponent.speed) * 0.04))
+            chance = max(0.20, min(0.85, 0.50 + (runner.agility - opponent.agility) * 0.04))
             success = rng.random() < chance
             if success:
                 runner.last_result = f"You escaped from {opponent.name}."
                 opponent.last_result = f"{runner.name} escaped from the battle."
-                event = game.add_event(
+                event = _log(
                     f"{runner.name} escaped the battle with {opponent.name}.",
                     "BATTLE_RUN",
                 )
@@ -1200,7 +1303,7 @@ def _resolve_battle_turn_locked(battle: Battle) -> list[dict[str, Any]]:
                 return events
             runner.last_result = f"You tried to run from {opponent.name}, but failed."
             opponent.last_result = f"{runner.name} tried to run, but failed."
-            events.append(game.add_event(
+            events.append(_log(
                 f"{runner.name} failed to escape {opponent.name}.",
                 "BATTLE_RUN_FAILED",
             ))
@@ -1216,7 +1319,7 @@ def _resolve_battle_turn_locked(battle: Battle) -> list[dict[str, Any]]:
                 player_a.health = max(0, player_a.health - damage)
                 player_b.last_result = f"You caught {player_a.name} while they ran for {damage} damage."
                 player_a.last_result = f"You failed to run and took {damage} damage from {player_b.name}."
-                events.append(game.add_event(
+                events.append(_log(
                     f"{player_b.name} struck {player_a.name} for {damage} damage as they tried to run.{(' Critical hit.' if critical else '')}{(' Armor helped.' if reduction else '')}",
                     "BATTLE_HIT",
                 ))
@@ -1230,7 +1333,7 @@ def _resolve_battle_turn_locked(battle: Battle) -> list[dict[str, Any]]:
             player_b.health = max(0, player_b.health - damage)
             player_a.last_result = f"You caught {player_b.name} while they ran for {damage} damage."
             player_b.last_result = f"You failed to run and took {damage} damage from {player_a.name}."
-            events.append(game.add_event(
+            events.append(_log(
                 f"{player_a.name} struck {player_b.name} for {damage} damage as they tried to run.{(' Critical hit.' if critical else '')}{(' Armor helped.' if reduction else '')}",
                 "BATTLE_HIT",
             ))
@@ -1247,7 +1350,7 @@ def _resolve_battle_turn_locked(battle: Battle) -> list[dict[str, Any]]:
             player_b.health = max(0, player_b.health - damage)
             player_a.last_result = f"You attacked {player_b.name} for {damage} damage."
             player_b.last_result = f"{player_a.name} attacked you for {damage} damage."
-            events.append(game.add_event(
+            events.append(_log(
                 f"{player_a.name} attacked {player_b.name} for {damage} damage.{(' Critical hit.' if critical else '')}{(' Defense/armor reduced the hit.' if reduction else '')}",
                 "BATTLE_HIT",
             ))
@@ -1261,7 +1364,7 @@ def _resolve_battle_turn_locked(battle: Battle) -> list[dict[str, Any]]:
             player_a.health = max(0, player_a.health - damage)
             player_b.last_result = f"You attacked {player_a.name} for {damage} damage."
             player_a.last_result = f"{player_b.name} attacked you for {damage} damage."
-            events.append(game.add_event(
+            events.append(_log(
                 f"{player_b.name} attacked {player_a.name} for {damage} damage.{(' Critical hit.' if critical else '')}{(' Defense/armor reduced the hit.' if reduction else '')}",
                 "BATTLE_HIT",
             ))
@@ -1274,7 +1377,7 @@ def _resolve_battle_turn_locked(battle: Battle) -> list[dict[str, Any]]:
         if action_a == action_b == "BATTLE_DEFEND" and player_a.alive and player_b.alive:
             player_a.last_result = f"You defended against {player_b.name}."
             player_b.last_result = f"You defended against {player_a.name}."
-            events.append(game.add_event(
+            events.append(_log(
                 f"{player_a.name} and {player_b.name} both held their ground.",
                 "BATTLE_DEFEND",
             ))
@@ -1295,7 +1398,7 @@ def _resolve_battle_turn_locked(battle: Battle) -> list[dict[str, Any]]:
         player.action_taken = True
         player.action_deadline = battle.deadline
         player.last_result = f"Battle turn {battle.turn_number}: choose ATTACK, DEFEND, or RUN."
-    events.append(game.add_event(
+    events.append(_log(
         f"Battle between {player_a.name} and {player_b.name} moves to turn {battle.turn_number}.",
         "BATTLE_TURN",
     ))
@@ -1339,13 +1442,13 @@ def _use_item_locked(player: Player, item_id: str) -> dict[str, Any]:
         player.status_effect = "ARMORED"
         player.last_result = "You prepared the Armor. The next hit against you will be reduced by 8 damage."
     elif item.type == "SPEED_BOOST":
-        player.speed += 3
-        player.last_result = "You used the Speed Boost. Speed increased by 3."
+        player.agility += 3
+        player.last_result = "You used the Agility Boost. Agility increased by 3."
     else:
         raise HTTPException(status_code=409, detail="Unknown item.")
 
     player.inventory.pop(item_index)
-    return game.add_event(f"{player.name} used a {item.name} in {ZONES[player.zone_id].name}.", "ITEM_USED")
+    return game.add_event(f"{player.name} used a {item.name} in {ZONES[player.zone_id].name}.", "ITEM_USED", player_ids=(player.id,))
 
 
 def _grab_item_locked(player: Player) -> dict[str, Any]:
@@ -1361,7 +1464,7 @@ def _grab_item_locked(player: Player) -> dict[str, Any]:
     item = game.zone_items["cornucopia"].pop(0)
     player.inventory.append(item)
     player.last_result = f"You grabbed a {item.name}. {item.description}"
-    return game.add_event(f"{player.name} grabbed a {item.name} from the Cornucopia.", "ITEM_GRABBED")
+    return game.add_event(f"{player.name} grabbed a {item.name} from the Cornucopia.", "ITEM_GRABBED", player_ids=(player.id,))
 
 
 def _apply_player_action_locked(
@@ -1385,9 +1488,11 @@ def _apply_player_action_locked(
         player.action_taken = True
         player.action_deadline = battle.deadline
         battle.actions[player.id] = action
+        # Only the chooser sees this: moves are simultaneous, so the opponent must not learn it.
         event = game.add_event(
             f"{player.name} chose {action.replace('BATTLE_', '')} in battle.",
             "BATTLE_ACTION",
+            player_ids=(player.id,),
         )
         if len(battle.actions) == 2:
             battle_events = _resolve_battle_turn_locked(battle)
@@ -1402,17 +1507,17 @@ def _apply_player_action_locked(
         previous = player.zone_id
         player.zone_id = target_zone_id or player.zone_id
         player.last_result = f"You moved from {ZONES[previous].name} to {ZONES[player.zone_id].name}."
-        event = game.add_event(f"{player.name} moved to {ZONES[player.zone_id].name}.", "PLAYER_MOVED")
+        event = game.add_event(f"{player.name} moved to {ZONES[player.zone_id].name}.", "PLAYER_MOVED", player_ids=(player.id,))
     elif action == "REST":
         old_health = player.health
         player.health = min(player.max_health, player.health + 5)
         player.last_result = f"You rested and recovered {player.health - old_health} health."
-        event = game.add_event(f"{player.name} rested in {ZONES[player.zone_id].name}.", "PLAYER_RESTED")
+        event = game.add_event(f"{player.name} rested in {ZONES[player.zone_id].name}.", "PLAYER_RESTED", player_ids=(player.id,))
     elif action == "SCOUT":
         adjacent = ZONES[player.zone_id].connected_zones
         counts = [f"{ZONES[zone_id].name}: {game.zone_counts[zone_id]}" for zone_id in adjacent]
         player.last_result = "Nearby population: " + ", ".join(counts) + "."
-        event = game.add_event(f"{player.name} scouted the area.", "PLAYER_SCOUTED")
+        event = game.add_event(f"{player.name} scouted the area.", "PLAYER_SCOUTED", player_ids=(player.id,))
     elif action == "ATTACK":
         target = game.players.get(target_player_id or "")
         if not target or not target.alive:
@@ -1442,6 +1547,7 @@ def _apply_player_action_locked(
         event = game.add_event(
             f"{player.name} engaged {target.name} in battle in {ZONES[player.zone_id].name}.",
             "BATTLE_STARTED",
+            player_ids=(player.id, target.id),
         )
     elif action == "USE_ITEM":
         event = _use_item_locked(player, item_id or "")
@@ -1449,7 +1555,7 @@ def _apply_player_action_locked(
         event = _grab_item_locked(player)
     else:  # WAIT
         player.last_result = "You waited and watched your surroundings."
-        event = game.add_event(f"{player.name} waited in {ZONES[player.zone_id].name}.", "PLAYER_WAITED")
+        event = game.add_event(f"{player.name} waited in {ZONES[player.zone_id].name}.", "PLAYER_WAITED", player_ids=(player.id,))
 
     return event
 
@@ -1484,6 +1590,10 @@ async def sync_everyone_full() -> None:
     )
 
 
+def _public_event(event: dict[str, Any]) -> dict[str, Any]:
+    return {key: event[key] for key in ("id", "timestamp", "type", "message")}
+
+
 async def sync_action_result(player_id: str, event: dict[str, Any]) -> None:
     async with state_lock:
         snapshot = player_state(game.players[player_id]) if player_id in game.players else None
@@ -1491,12 +1601,13 @@ async def sync_action_result(player_id: str, event: dict[str, Any]) -> None:
         spectator_snapshot = spectate_state()
 
     sends = [
-        manager.broadcast_players({"type": "PUBLIC_EVENT", "data": event}),
         manager.broadcast_admin({"type": "ADMIN_STATE", "data": admin_snapshot}),
         manager.broadcast_spectators({"type": "SPECTATE_STATE", "data": spectator_snapshot}),
     ]
     if snapshot is not None:
         sends.append(manager.send_player(player_id, {"type": "GAME_STATE", "data": snapshot}))
+    if event.get("broadcast"):
+        sends.append(manager.broadcast_players({"type": "PUBLIC_EVENT", "data": _public_event(event)}))
     await asyncio.gather(*sends)
 
 
@@ -1577,10 +1688,21 @@ async def join_game(request: JoinRequest) -> dict[str, Any]:
         if duplicate:
             raise HTTPException(status_code=409, detail="That name is already registered")
 
-        player = Player(id=next_player_id(), name=name)
+        levels = resolve_stat_choice(request.stats)
+        rolled = {stat: roll_stat(level) for stat, level in levels.items()}
+        player = Player(
+            id=next_player_id(),
+            name=name,
+            attack=rolled["attack"],
+            defense=rolled["defense"],
+            agility=rolled["agility"],
+            base_attack=rolled["attack"],
+            base_defense=rolled["defense"],
+            base_agility=rolled["agility"],
+        )
         game.players[player.id] = player
         _write_checkpoint_locked()
-        event = game.add_event(f"{player.name} joined the arena ({player.id}).", "PLAYER_JOINED")
+        game.add_event(f"{player.name} joined the arena ({player.id}).", "PLAYER_JOINED", player_ids=(player.id,))
         player_snapshot = player_state(player)
         current_game = {
             "gameId": game.game_id,
@@ -1592,7 +1714,6 @@ async def join_game(request: JoinRequest) -> dict[str, Any]:
         }
 
     await asyncio.gather(
-        manager.broadcast_players({"type": "PUBLIC_EVENT", "data": event}),
         manager.broadcast_admin({"type": "ADMIN_STATE", "data": admin_state()}),
         manager.broadcast_spectators({"type": "SPECTATE_STATE", "data": spectate_state()}),
     )
@@ -1668,7 +1789,7 @@ async def admin_action(
             game.status = GameStatus.ACTIVE
             game.round_number = 1
             game.winner_id = None
-            game.add_event("The arena has begun.", "GAME_STARTED")
+            game.add_event("The arena has begun.", "GAME_STARTED", broadcast=True)
             _begin_round_locked()
         elif action == "PAUSE_GAME":
             if game.status != GameStatus.ACTIVE:
@@ -1685,7 +1806,7 @@ async def admin_action(
                 if player.alive:
                     player.action_deadline = None
             game.status = GameStatus.PAUSED
-            game.add_event("The arena has been paused by the admin.", "GAME_PAUSED")
+            game.add_event("The arena has been paused by the admin.", "GAME_PAUSED", broadcast=True)
         elif action == "RESUME_GAME":
             if game.status != GameStatus.PAUSED:
                 raise HTTPException(status_code=409, detail="Game is not paused")
@@ -1701,7 +1822,7 @@ async def admin_action(
                     player.action_deadline = game.battles[player.battle_id].deadline if player.battle_id in game.battles else (None if player.action_taken else game.round_deadline)
             game.status = GameStatus.ACTIVE
             game.paused_remaining_seconds = None
-            game.add_event("The arena has resumed.", "GAME_RESUMED")
+            game.add_event("The arena has resumed.", "GAME_RESUMED", broadcast=True)
         elif action == "END_ROUND":
             if game.status != GameStatus.ACTIVE:
                 raise HTTPException(status_code=409, detail="Game is not active")
@@ -1735,7 +1856,7 @@ async def admin_action(
             message = " ".join((request.message or "").strip().split())
             if not message:
                 raise HTTPException(status_code=400, detail="Enter an announcement message")
-            selected_event = game.add_event(f"ARENA ANNOUNCEMENT: {message}", "ANNOUNCEMENT")
+            selected_event = game.add_event(f"ARENA ANNOUNCEMENT: {message}", "ANNOUNCEMENT", broadcast=True)
         elif action in {"ELIMINATE_PLAYER", "RESTORE_PLAYER", "MOVE_PLAYER", "SET_HEALTH", "SET_STATS", "GIVE_ITEM"}:
             if not request.targetPlayerId:
                 raise HTTPException(status_code=400, detail="Choose a player")
@@ -1764,7 +1885,7 @@ async def admin_action(
                 target.action_taken = game.status != GameStatus.ACTIVE
                 target.current_action = None
                 target.action_deadline = None if game.status != GameStatus.ACTIVE else game.round_deadline
-                selected_event = game.add_event(f"{target.name} ({target.id}) was restored to the arena by the admin.", "PLAYER_RESTORED")
+                selected_event = game.add_event(f"{target.name} ({target.id}) was restored to the arena by the admin.", "PLAYER_RESTORED", player_ids=(target.id,))
             elif action == "MOVE_PLAYER":
                 destination = request.targetZoneId
                 if not destination or destination not in ZONES:
@@ -1776,7 +1897,7 @@ async def admin_action(
                 else:
                     target.zone_id = destination
                 target.last_result = f"An admin moved you to {ZONES[destination].name}."
-                selected_event = game.add_event(f"Admin moved {target.name} ({target.id}) to {ZONES[destination].name}.", "PLAYER_MOVED_ADMIN")
+                selected_event = game.add_event(f"Admin moved {target.name} ({target.id}) to {ZONES[destination].name}.", "PLAYER_MOVED_ADMIN", player_ids=(target.id,))
             elif action == "SET_HEALTH":
                 if target.battle_id:
                     _end_battle_locked(target.battle_id, reason=f"The battle involving {target.name} ended after an admin health change.")
@@ -1788,9 +1909,15 @@ async def admin_action(
                     target.alive = False
                     target.status_effect = "ELIMINATED"
                 target.last_result = f"An admin set your health to {target.health}."
-                selected_event = game.add_event(f"Admin set {target.name} ({target.id}) health to {target.health}.", "PLAYER_HEALTH_SET")
+                selected_event = game.add_event(f"Admin set {target.name} ({target.id}) health to {target.health}.", "PLAYER_HEALTH_SET", player_ids=(target.id,))
             elif action == "SET_STATS":
-                if request.attack is None and request.speed is None and request.value is None:
+                new_agility = request.agility if request.agility is not None else request.speed
+                if (
+                    request.attack is None
+                    and request.defense is None
+                    and new_agility is None
+                    and request.value is None
+                ):
                     raise HTTPException(status_code=400, detail="Provide at least one stat value")
                 if target.battle_id:
                     _end_battle_locked(target.battle_id, reason=f"The battle involving {target.name} ended after an admin stat change.")
@@ -1798,13 +1925,15 @@ async def admin_action(
                     target.health = min(target.max_health, request.value)
                 if request.attack is not None:
                     target.attack = request.attack
-                if request.speed is not None:
-                    target.speed = request.speed
+                if request.defense is not None:
+                    target.defense = request.defense
+                if new_agility is not None:
+                    target.agility = new_agility
                 if target.health > 0 and not target.alive and game.status != GameStatus.GAME_OVER:
                     target.alive = True
                     target.status_effect = "NORMAL"
                 target.last_result = "An admin updated your arena stats."
-                selected_event = game.add_event(f"Admin updated {target.name} ({target.id}) stats.", "PLAYER_STATS_SET")
+                selected_event = game.add_event(f"Admin updated {target.name} ({target.id}) stats.", "PLAYER_STATS_SET", player_ids=(target.id,))
             elif action == "GIVE_ITEM":
                 item_type = (request.itemType or "").upper()
                 if item_type not in ITEM_DEFINITIONS:
@@ -1814,7 +1943,7 @@ async def admin_action(
                 item = make_item(item_type)
                 target.inventory.append(item)
                 target.last_result = f"An admin gave you a {item.name}."
-                selected_event = game.add_event(f"Admin gave {target.name} ({target.id}) a {item.name}.", "ITEM_GRANTED")
+                selected_event = game.add_event(f"Admin gave {target.name} ({target.id}) a {item.name}.", "ITEM_GRANTED", player_ids=(target.id,))
         elif action == "RESET_GAME":
             reset_requested = True
             game.status = GameStatus.LOBBY
@@ -1839,7 +1968,7 @@ async def admin_action(
     if reset_requested:
         await manager.close_all_players({"type": "RESET"})
     if selected_event and action == "BROADCAST_ANNOUNCEMENT":
-        await manager.broadcast_players({"type": "PUBLIC_EVENT", "data": selected_event})
+        await manager.broadcast_players({"type": "PUBLIC_EVENT", "data": _public_event(selected_event)})
     await sync_everyone_full()
     return snapshot
 

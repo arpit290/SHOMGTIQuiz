@@ -313,3 +313,115 @@ select:focus { border-color: #827d72; }
   .opponent-picker { grid-template-columns: minmax(0, 1fr) auto; }
   .opponent-picker .button { width: auto; min-width: 92px; }
 }
+
+/* ------------------------------------------------------------------ */
+/* Stat picker (registration step 2)                                   */
+/* ------------------------------------------------------------------ */
+.stat-picker { display: grid; gap: 14px; }
+.stat-picker h2 { font-size: clamp(1.6rem, 6vw, 2.4rem); }
+.stat-picker .muted { margin: 0; font-size: .86rem; line-height: 1.5; }
+.stat-pick-row { border: 1px solid #2b2e33; background: #0f1013; padding: 12px; display: grid; gap: 10px; }
+.stat-pick-label { display: grid; gap: 3px; }
+.stat-pick-label strong { font-size: .8rem; letter-spacing: .14em; }
+.stat-pick-label small { color: #77736c; font-size: .72rem; line-height: 1.35; }
+.stat-pick-options { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+.stat-pick-btn { display: grid; gap: 2px; justify-items: center; padding: 11px 4px; border: 1px solid #3a3d42; background: #15171a; color: #ddd8cc; font-weight: 800; letter-spacing: .08em; font-size: .74rem; }
+.stat-pick-btn small { font-size: .62rem; color: #77736c; letter-spacing: .06em; }
+.stat-pick-btn.selected { background: #dfd8ca; color: #0b0c0e; border-color: #dfd8ca; }
+.stat-pick-btn.selected small { color: #4c4944; }
+.stat-picker-actions { display: grid !important; grid-template-columns: 1fr 2fr; gap: 8px; }
+
+/* ------------------------------------------------------------------ */
+/* Player game screen — one phone screen, no page scroll               */
+/* ------------------------------------------------------------------ */
+.pg {
+  position: fixed; top: 0; left: 0; right: 0; z-index: 30;
+  height: 100vh; height: 100dvh;
+  display: flex; flex-direction: column; gap: 8px;
+  padding: calc(10px + env(safe-area-inset-top, 0px)) max(12px, calc((100% - 520px) / 2)) 0;
+  background: #08090b; overflow: hidden;
+}
+.pg-eyebrow { color: #918d84; font-size: .6rem; font-weight: 800; letter-spacing: .14em; }
+.pg-head { display: flex; justify-content: space-between; align-items: center; gap: 10px; flex: 0 0 auto; }
+.pg-zone { display: grid; gap: 3px; min-width: 0; }
+.pg-zone strong { font-size: 1.45rem; letter-spacing: -.03em; line-height: 1.1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+
+.timer { flex: 0 0 auto; width: 68px; display: grid; gap: 4px; padding: 6px 8px; border: 1px solid #383b40; background: #111317; text-align: center; }
+.timer-num { font-size: 1.5rem; font-weight: 800; font-variant-numeric: tabular-nums; line-height: 1; }
+.timer-track { display: block; height: 4px; background: #23262b; overflow: hidden; }
+.timer-track > span { display: block; height: 100%; background: #d6d0c2; transition: width .2s linear; }
+.timer.urgent { border-color: #7a4c44; }
+.timer.urgent .timer-num { color: #f0b4a8; }
+.timer.is-paused .timer-num { opacity: .5; }
+
+.hp { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center; flex: 0 0 auto; }
+.hp-label { color: #918d84; font-size: .66rem; font-weight: 900; letter-spacing: .14em; }
+.hp-track { height: 12px; background: #23262b; overflow: hidden; }
+.hp-track > span { display: block; height: 100%; background: #9fc79f; transition: width .25s ease, background .25s ease; }
+.hp.low .hp-track > span { background: #d0776a; }
+.hp-value { font-size: 1.1rem; font-variant-numeric: tabular-nums; }
+.hp-value small { color: #77736c; font-size: .72rem; font-weight: 600; }
+
+.pg-status { margin: 0; flex: 0 0 auto; color: #b8b3aa; font-size: .8rem; line-height: 1.35; min-height: 2.7em; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
+.pg-alert { flex: 0 0 auto; border: 1px solid #67562f; background: #17150f; color: #e7d5a3; padding: 7px 10px; font-size: .68rem; font-weight: 800; letter-spacing: .08em; }
+.pg-alert.conn { border-color: #63403b; background: #211312; color: #e0c4be; }
+.pg-error { flex: 0 0 auto; background: #2b1515; border: 1px solid #673a36; color: #ffd8d0; padding: 8px 10px; font-size: .76rem; }
+
+.pg-body { flex: 1 1 auto; min-height: 0; overflow-y: auto; overscroll-behavior: contain; -webkit-overflow-scrolling: touch; width: auto; margin: 0; padding: 0; }
+.pg-section { display: grid; gap: 10px; align-content: start; }
+.pg-note { margin: 0; color: #858078; font-size: .78rem; line-height: 1.4; }
+.pg-card { border: 1px solid #2c2f34; background: linear-gradient(135deg, #121316, #0d0e10); padding: 16px; display: grid; gap: 6px; }
+.pg-card strong { font-size: 1.15rem; letter-spacing: -.02em; }
+.pg-card p { margin: 0; color: #aaa69e; font-size: .84rem; line-height: 1.45; }
+.pg-card.end { border-color: #4a3a36; }
+
+.pg-btn { border: 1px solid #3a3d42; background: #15171a; color: #ddd8cc; min-height: 50px; padding: 8px 6px; border-radius: 0; font-weight: 800; letter-spacing: .08em; font-size: .78rem; display: grid; gap: 2px; align-content: center; justify-items: center; touch-action: manipulation; }
+.pg-btn:active:not(:disabled) { background: #dfd8ca; color: #0b0c0e; }
+.pg-btn:disabled { opacity: .4; cursor: not-allowed; }
+.pg-btn.small { min-height: 40px; padding: 6px 14px; }
+.pg-btn.danger { color: #ffd6d0; background: #261313; border-color: #633b36; }
+.pg-btn.grab { border-color: #6a5935; background: #19150d; }
+.pg-btn small { font-size: .62rem; letter-spacing: 0; font-weight: 600; color: #89827a; }
+.pg-action-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 8px; }
+.pg-move-grid { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.pg-attack-row { display: grid; grid-template-columns: minmax(0, 1fr) auto; gap: 8px; align-items: stretch; }
+.pg-attack-row select { width: 100%; min-width: 0; font-size: 16px; padding: 0 10px; }
+.pg-attack-row .pg-btn { min-height: 46px; padding: 0 16px; }
+
+.pg-items { display: grid; gap: 8px; }
+.pg-item { display: flex; justify-content: space-between; align-items: center; gap: 10px; border: 1px solid #2b2e33; background: #121418; padding: 8px 8px 8px 12px; }
+.pg-item > div { display: grid; gap: 2px; min-width: 0; }
+.pg-item strong { font-size: .86rem; }
+.pg-item small { color: #77736c; font-size: .68rem; line-height: 1.3; }
+
+.pg-battle { border: 1px solid #5a3f37; background: linear-gradient(135deg, #171111, #101013); padding: 12px; display: grid; gap: 12px; }
+.pg-battle-top { display: flex; justify-content: space-between; align-items: center; gap: 10px; }
+.pg-battle-top > div { display: grid; gap: 3px; min-width: 0; }
+.pg-battle-top strong { font-size: 1.1rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.pg-battle-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
+.pg-btn.battle { min-height: 84px; background: #171315; }
+.pg-btn.battle strong { font-size: .84rem; letter-spacing: .1em; }
+.pg-btn.battle.selected { background: #e4dcd0; color: #0b0c0e; }
+.pg-btn.battle.selected small { color: #4c4944; }
+
+.pg-tabs { flex: 0 0 auto; display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); border-top: 1px solid #2b2e33; margin: 0 calc(-1 * max(12px, (100vw - 520px) / 2)); padding-bottom: env(safe-area-inset-bottom, 0px); background: #0b0c0f; }
+.pg-tabs button { min-height: 54px; border: 0; border-right: 1px solid #1c1e22; background: transparent; color: #8d897f; font-weight: 800; font-size: .72rem; letter-spacing: .12em; touch-action: manipulation; }
+.pg-tabs button:last-child { border-right: 0; }
+.pg-tabs button.active { background: #dfd8ca; color: #0b0c0e; }
+.pg-tabs button:disabled { opacity: .3; }
+.pg-feed-mini { flex: 0 1 34%; min-height: 0; overflow-y: auto; padding-bottom: calc(8px + env(safe-area-inset-bottom, 0px)); }
+
+.pg .event-feed { border-top: 0; padding-top: 0; }
+.pg .event-item { grid-template-columns: 58px 1fr; font-size: .76rem; padding: 7px 0; gap: 8px; }
+.pg .event-time { font-size: .64rem; padding-top: 1px; }
+.pg .section-heading { display: none; }
+.pg .muted { font-size: .78rem; margin: 0; }
+
+@media (max-width: 380px), (max-height: 640px) {
+  .pg { gap: 6px; }
+  .pg-zone strong { font-size: 1.2rem; }
+  .pg-btn { min-height: 44px; }
+  .pg-btn.battle { min-height: 70px; }
+  .pg-tabs button { min-height: 46px; }
+  .pg-status { min-height: 0; }
+}

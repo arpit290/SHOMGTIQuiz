@@ -150,3 +150,10 @@ ARENA_STATE_FILE=arena_state.json
 ## Notes
 
 The project intentionally remains an event-scale prototype rather than a production MMO. The single shared lock protects state changes, one round loop manages the global timer, and WebSockets are used only for state/event synchronization.
+
+## Player stats, phone UI and personal feed (latest changes)
+
+- **Stat selection:** after entering a name, players assign one **HIGH**, one **MID** and one **LOW** across **Attack**, **Defense** and **Agility**. MID is the baseline (10), HIGH/LOW are +/-40%, and each stat gets a small random multiplier (+/-4%, `STAT_JITTER`) so builds are never identical. `POST /api/join` accepts `stats: {attack, defense, agility}`; if omitted the server assigns a random valid split.
+- **Attack** scales damage dealt. **Defense** passively scales damage taken (0.6x at +40%, 1.4x at -40%). **Agility** drives RUN escape chance and scales arena-hazard damage the same way defense scales hits. It replaces the old `speed` stat (the admin `speed` field is still accepted as an alias for `agility`; the Speed Boost item now grants +3 Agility).
+- **Player screen** is a single phone-sized screen: only HP is shown, with ACT / MOVE / BAG / FEED tabs.
+- **Live feed** only contains events the player did, that happened to them, or arena-wide notices (announcements, game start/pause/resume/over). Opponents' simultaneous battle choices are never leaked.

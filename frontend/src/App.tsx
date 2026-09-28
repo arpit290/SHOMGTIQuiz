@@ -1,8 +1,10 @@
 import { FormEvent, useEffect, useMemo, useState } from 'react'
 import type { ReactNode } from 'react'
 import { Link, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
-import { adminAction, adminLogin, adminWsUrl, getAdminState, getPlayerState, getSpectateState, joinGame, playerWsUrl, spectateWsUrl, submitAction, type AdminActionOptions } from './api'
+import { adminAction, adminLogin, adminWsUrl, getAdminState, getPlayerState, getSpectateState, joinGame, playerWsUrl, spectateWsUrl, submitAction, type AdminActionOptions, type StatChoice, type StatLevel } from './api'
 import type { AdminState, Battle, GameEvent, InventoryItem, Player, PlayerGameState, SpectateState, VisibleOpponent, Zone } from './types'
+
+const fmtStat = (value: number) => (Math.round(value * 10) / 10).toString()
 
 const PLAYER_STORAGE_KEY = 'arena_player_session'
 const ADMIN_STORAGE_KEY = 'arena_admin_token'
@@ -62,32 +64,68 @@ function LandingPage() {
   )
 }
 
+const STAT_ROWS: { key: keyof StatChoice; label: string; hint: string }[] = [
+  { key: 'attack', label: 'ATTACK', hint: 'How hard you hit.' },
+  { key: 'defense', label: 'DEFENSE', hint: 'How much of an enemy hit you shrug off.' },
+  { key: 'agility', label: 'AGILITY', hint: 'Escaping fights and resisting zone hazards.' },
+]
+const STAT_LEVELS: { id: StatLevel; label: string; sub: string }[] = [
+  { id: 'LOW', label: 'LOW', sub: '−40%' },
+  { id: 'MID', label: 'MID', sub: 'BASE' },
+  { id: 'HIGH', label: 'HIGH', sub: '+40%' },
+]
+type StatPicks = Record<keyof StatChoice, StatLevel | null>
+
 function JoinPage() {
   const navigate = useNavigate()
   const [name, setName] = useState('')
+  const [step, setStep] = useState<'NAME' | 'STATS'>('NAME')
+  const [picks, setPicks] = useState<StatPicks>({ attack: null, defense: null, agility: null })
   const [error, setError] = useState('')
   const [loading, setLoading] = useState(false)
 
-  async function handleSubmit(event: FormEvent) {
+  function handleNameSubmit(event: FormEvent) {
     event.preventDefault()
+    setError('')
+    const specialPaths: Record<string, string> = {
+      trinav: '/trinav',
+      chewie: '/chewie',
+      arpit: '/arpit',
+    }
+    const specialPath = specialPaths[name.trim().toLowerCase()]
+    if (specialPath) {
+      navigate(specialPath)
+      return
+    }
+    setStep('STATS')
+  }
+
+  // Each level can be held by exactly one stat: picking a level someone else holds takes it over.
+  function pick(stat: keyof StatChoice, level: StatLevel) {
+    setPicks((current) => {
+      const next = { ...current }
+      const alreadyHere = current[stat] === level
+      ;(Object.keys(next) as (keyof StatChoice)[]).forEach((key) => {
+        if (next[key] === level) next[key] = null
+      })
+      next[stat] = alreadyHere ? null : level
+      return next
+    })
+  }
+
+  const complete = picks.attack !== null && picks.defense !== null && picks.agility !== null
+
+  async function handleJoin() {
+    if (!complete) return
     setError('')
     setLoading(true)
     try {
-      const specialPaths: Record<string, string> = {
-        trinav: '/trinav',
-        chewie: '/chewie',
-        arpit: '/arpit',
-      }
-      const specialPath = specialPaths[name.trim().toLowerCase()]
-      if (specialPath) {
-        navigate(specialPath)
-        return
-      }
-      const result = await joinGame(name)
+      const result = await joinGame(name, picks as StatChoice)
       localStorage.setItem(PLAYER_STORAGE_KEY, JSON.stringify(result))
       navigate('/lobby')
     } catch (err) {
       setError(err instanceof Error ? err.message : 'Unable to join')
+      setStep('NAME')
     } finally {
       setLoading(false)
     }
@@ -97,16 +135,47 @@ function JoinPage() {
     <>
       <ExistingSessionRedirect />
       <section className="narrow panel">
-      <p className="eyebrow">PLAYER REGISTRATION</p>
-      <h2>ENTER YOUR NAME</h2>
-      <p className="muted">One name per participant. Registration closes when the admin starts the game.</p>
-      <form onSubmit={handleSubmit} className="stack">
-        <input autoFocus maxLength={32} value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name" />
-        <button disabled={loading || !name.trim()} className="button button-primary" type="submit">
-          {loading ? 'JOINING…' : 'JOIN GAME'}
-        </button>
-      </form>
-      {error && <div className="error">{error}</div>}
+        {step === 'NAME' ? (
+          <>
+            <p className="eyebrow">PLAYER REGISTRATION</p>
+            <h2>ENTER YOUR NAME</h2>
+            <p className="muted">One name per participant. Registration closes when the admin starts the game.</p>
+            <form onSubmit={handleNameSubmit} className="stack">
+              <input autoFocus maxLength={32} value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name" />
+              <button disabled={!name.trim()} className="button button-primary" type="submit">CONTINUE</button>
+            </form>
+          </>
+        ) : (
+          <div className="stat-picker">
+            <p className="eyebrow">STEP 2 // {name.trim().toUpperCase()}</p>
+            <h2>CHOOSE YOUR STATS</h2>
+            <p className="muted">Give one stat <strong>HIGH</strong>, one <strong>MID</strong> and one <strong>LOW</strong>. HIGH is 40% above baseline, LOW is 40% below. A small random tweak is added so no two players are identical.</p>
+            {STAT_ROWS.map((row) => (
+              <div key={row.key} className="stat-pick-row">
+                <div className="stat-pick-label"><strong>{row.label}</strong><small>{row.hint}</small></div>
+                <div className="stat-pick-options">
+                  {STAT_LEVELS.map((level) => (
+                    <button
+                      key={level.id}
+                      type="button"
+                      className={`stat-pick-btn ${picks[row.key] === level.id ? 'selected' : ''}`}
+                      onClick={() => pick(row.key, level.id)}
+                    >
+                      <span>{level.label}</span><small>{level.sub}</small>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            ))}
+            <div className="button-row stat-picker-actions">
+              <button type="button" className="button button-secondary" disabled={loading} onClick={() => setStep('NAME')}>BACK</button>
+              <button type="button" className="button button-primary" disabled={!complete || loading} onClick={() => void handleJoin()}>
+                {loading ? 'JOINING…' : 'JOIN GAME'}
+              </button>
+            </div>
+          </div>
+        )}
+        {error && <div className="error">{error}</div>}
       </section>
     </>
   )
@@ -118,7 +187,7 @@ function EventFeed({ events, compact = false }: { events: GameEvent[]; compact?:
       <div className="section-heading">LIVE FEED</div>
       {events.length === 0 ? <p className="muted">No events yet.</p> : events.slice().reverse().map((event) => (
         <div key={event.id} className="event-item">
-          <span className="event-time">{new Date(event.timestamp).toLocaleTimeString()}</span>
+          <span className="event-time">{new Date(event.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false })}</span>
           <span>{event.message}</span>
         </div>
       ))}
@@ -165,7 +234,12 @@ function usePlayerSocket() {
         }
         if (payload.type === 'GAME_STATE') setState(payload.data as PlayerGameState)
         if (payload.type === 'PUBLIC_EVENT') {
-          setState((current) => current ? { ...current, events: [...current.events, payload.data as GameEvent].slice(-30) } : current)
+          setState((current) => {
+            if (!current) return current
+            const incoming = payload.data as GameEvent
+            if (current.events.some((existing) => existing.id === incoming.id)) return current
+            return { ...current, events: [...current.events, incoming].slice(-30) }
+          })
         }
       }
       ws.onerror = () => { setError('Connection interrupted. Reconnecting…'); setConnectionStatus('RECONNECTING') }
@@ -222,7 +296,7 @@ function PlayerLobby() {
   )
 }
 
-function Countdown({ deadline, serverNow, durationSeconds, paused = false }: { deadline: string | null; serverNow: string; durationSeconds: number; paused?: boolean }) {
+function Countdown({ deadline, serverNow, durationSeconds, paused = false, compact = false }: { deadline: string | null; serverNow: string; durationSeconds: number; paused?: boolean; compact?: boolean }) {
   const offsetMs = useMemo(() => new Date(serverNow).getTime() - Date.now(), [serverNow])
   const [remaining, setRemaining] = useState(0)
 
@@ -242,8 +316,18 @@ function Countdown({ deadline, serverNow, durationSeconds, paused = false }: { d
   const seconds = Math.ceil(remaining / 1000)
   const fraction = paused ? 0 : Math.min(1, remaining / Math.max(1000, durationSeconds * 1000))
 
+  const urgent = seconds <= 5 && seconds > 0
+  if (compact) {
+    return (
+      <div className={`timer ${urgent ? 'urgent' : ''} ${paused ? 'is-paused' : ''}`} aria-label="Time remaining">
+        <span className="timer-num">{paused ? '—' : seconds}</span>
+        <span className="timer-track"><span style={{ width: `${Math.max(0, fraction * 100)}%` }} /></span>
+      </div>
+    )
+  }
+
   return (
-    <div className={`countdown ${seconds <= 5 && seconds > 0 ? 'urgent' : ''} ${paused ? 'is-paused' : ''}`}>
+    <div className={`countdown ${urgent ? 'urgent' : ''} ${paused ? 'is-paused' : ''}`}>
       <div className="countdown-label">{paused ? 'PAUSED' : 'TIME REMAINING'}</div>
       <div className="countdown-number">{paused ? '—' : seconds}</div>
       <div className="countdown-track"><span style={{ width: `${Math.max(0, fraction * 100)}%` }} /></div>
@@ -255,94 +339,52 @@ function Stat({ label, value }: { label: string; value: string }) {
   return <div className="stat"><span>{label}</span><strong>{value}</strong></div>
 }
 
-function PlayerStats({ player }: { player: Player }) {
+type PlayTab = 'ACT' | 'MOVE' | 'ITEMS' | 'FEED'
+
+function HpBar({ player }: { player: Player }) {
+  const pct = Math.max(0, Math.min(100, (player.health / player.maxHealth) * 100))
   return (
-    <div className="stat-grid three">
-      <div className="stat stat-health"><span>HEALTH</span><strong>{player.health}/{player.maxHealth}</strong><div className="health-bar"><span style={{ width: `${Math.max(0, Math.min(100, player.health / player.maxHealth * 100))}%` }} /></div></div>
-      <Stat label="ATTACK" value={String(player.attack)} />
-      <Stat label="SPEED" value={String(player.speed)} />
+    <div className={`hp ${pct <= 25 ? 'low' : ''}`}>
+      <span className="hp-label">HP</span>
+      <div className="hp-track"><span style={{ width: `${pct}%` }} /></div>
+      <strong className="hp-value">{player.health}<small>/{player.maxHealth}</small></strong>
     </div>
   )
 }
 
-function Inventory({ items, disabled, onUse }: { items: InventoryItem[]; disabled: boolean; onUse: (itemId: string) => void }) {
-  return (
-    <div className="subpanel">
-      <div className="section-heading">INVENTORY <span className="heading-count">{items.length}</span></div>
-      {items.length === 0 ? <p className="muted">Empty. Grab supplies at the Cornucopia.</p> : (
-        <div className="inventory-grid">
-          {items.map((item) => (
-            <div key={item.id} className="item-card">
-              <div><strong>{item.name}</strong><span>{item.type.replace('_', ' ')}</span></div>
-              <p>{item.description}</p>
-              <button className="button button-secondary button-small" disabled={disabled} onClick={() => onUse(item.id)}>USE</button>
-            </div>
-          ))}
-        </div>
-      )}
-    </div>
-  )
-}
-
-function OpponentList({ opponents, disabled, onAttack }: { opponents: VisibleOpponent[]; disabled: boolean; onAttack: (playerId: string) => void }) {
-  const [selectedOpponentId, setSelectedOpponentId] = useState('')
-  const selectedOpponent = opponents.find((opponent) => opponent.id === selectedOpponentId)
-
-  useEffect(() => {
-    if (!opponents.some((opponent) => opponent.id === selectedOpponentId)) {
-      setSelectedOpponentId(opponents[0]?.id ?? '')
-    }
-  }, [opponents, selectedOpponentId])
-
-  return (
-    <div className="subpanel opponent-panel">
-      <div className="section-heading">PLAYERS IN YOUR ZONE <span className="heading-count">{opponents.length}</span></div>
-      {opponents.length === 0 ? <p className="muted">No other players are currently visible in this zone.</p> : (
-        <div className="opponent-picker">
-          <select value={selectedOpponentId} onChange={(e) => setSelectedOpponentId(e.target.value)} disabled={disabled}>
-            {opponents.map((opponent) => <option key={opponent.id} value={opponent.id}>{opponent.name} · {opponent.health}/{opponent.maxHealth} HP</option>)}
-          </select>
-          <button className="button button-danger" disabled={disabled || !selectedOpponent} onClick={() => selectedOpponent && onAttack(selectedOpponent.id)}>ATTACK</button>
-        </div>
-      )}
-    </div>
-  )
-}
-
-function BattlePanel({ battle, opponent, serverNow, durationSeconds, disabled, onAction }: {
+function BattlePanel({ battle, opponentName, serverNow, durationSeconds, disabled, onAction }: {
   battle: Battle
-  opponent?: VisibleOpponent
+  opponentName: string
   serverNow: string
   durationSeconds: number
   disabled: boolean
   onAction: (action: string) => void
 }) {
   const options = [
-    { id: 'BATTLE_ATTACK', label: 'ATTACK', detail: 'Base damage from ATK plus a small speed edge; 12% crit chance.' },
-    { id: 'BATTLE_DEFEND', label: 'DEFEND', detail: 'Reduces incoming damage by 55%; armor can reduce it by another 8.' },
-    { id: 'BATTLE_RUN', label: 'RUN', detail: 'Escape chance starts at 50% and shifts by 4% per SPEED point.' },
+    { id: 'BATTLE_ATTACK', label: 'ATTACK', detail: 'Hit them' },
+    { id: 'BATTLE_DEFEND', label: 'DEFEND', detail: 'Take less damage' },
+    { id: 'BATTLE_RUN', label: 'RUN', detail: 'Try to escape' },
   ]
   return (
-    <div className="battle-panel">
-      <div className="battle-heading">
+    <div className="pg-battle">
+      <div className="pg-battle-top">
         <div>
-          <p className="eyebrow">ENGAGED // TURN {battle.turn}</p>
-          <h3>BATTLE WITH {opponent?.name?.toUpperCase() ?? battle.playerBId}</h3>
-          <p className="muted">You cannot move, rest, use items, scout, or take supplies until the battle ends.</p>
+          <span className="pg-eyebrow">ENGAGED · TURN {battle.turn}</span>
+          <strong>vs {opponentName}</strong>
         </div>
-        <Countdown deadline={battle.deadline} serverNow={serverNow} durationSeconds={durationSeconds} />
+        <Countdown compact deadline={battle.deadline} serverNow={serverNow} durationSeconds={durationSeconds} />
       </div>
-      <div className="battle-status-row">
-        <span>{battle.yourAction ? `YOU: ${battle.yourAction.replace('BATTLE_', '')}` : 'YOU: CHOOSE A MOVE'}</span>
-        <span>{battle.opponentActionSubmitted ? 'OPPONENT: MOVE LOCKED' : 'OPPONENT: THINKING'}</span>
-      </div>
-      <div className="battle-actions">
+      <div className="pg-battle-actions">
         {options.map((option) => (
-          <button key={option.id} className={`button battle-action ${battle.yourAction === option.id ? 'selected' : ''}`} disabled={disabled} onClick={() => onAction(option.id)}>
+          <button key={option.id} className={`pg-btn battle ${battle.yourAction === option.id ? 'selected' : ''}`} disabled={disabled} onClick={() => onAction(option.id)}>
             <strong>{option.label}</strong><small>{option.detail}</small>
           </button>
         ))}
       </div>
+      <p className="pg-note">
+        {battle.yourAction ? `You chose ${battle.yourAction.replace('BATTLE_', '')}. ` : 'Pick your move. '}
+        {battle.opponentActionSubmitted ? 'Opponent has locked in.' : 'Opponent is thinking…'}
+      </p>
     </div>
   )
 }
@@ -351,13 +393,27 @@ function PlayerGame() {
   const { state, error, connectionStatus } = usePlayerSocket()
   const [actionError, setActionError] = useState('')
   const [submitting, setSubmitting] = useState(false)
-  const [selectedAction, setSelectedAction] = useState<string | null>(null)
+  const [tab, setTab] = useState<PlayTab>('ACT')
+  const [targetId, setTargetId] = useState('')
+  const inBattle = Boolean(state?.battle)
+
+  // Battles take over the action tab; clear stale errors when a new round starts.
+  useEffect(() => { if (inBattle) setTab('ACT') }, [inBattle])
+  useEffect(() => { setActionError('') }, [state?.round])
+
+  const opponents = state?.visibleOpponents ?? []
+  useEffect(() => {
+    if (!opponents.some((opponent) => opponent.id === targetId)) setTargetId(opponents[0]?.id ?? '')
+  }, [opponents, targetId])
 
   if (!state) return <LoadingState text={error || 'Entering the arena…'} />
 
-  const isPlayable = state.status === 'ACTIVE' && state.player.alive && !state.player.actionTaken && !state.battle
+  const player = state.player
   const isFinished = state.status === 'GAME_OVER'
   const isPaused = state.status === 'PAUSED'
+  const playable = state.status === 'ACTIVE' && player.alive && !player.actionTaken && !state.battle
+  const inPlay = player.alive && !isFinished && !isPaused
+  const can = (action: string) => playable && !submitting && state.availableActions.includes(action)
 
   async function doAction(action: string, options?: { targetZoneId?: string; targetPlayerId?: string; itemId?: string }) {
     const raw = localStorage.getItem(PLAYER_STORAGE_KEY)
@@ -365,109 +421,121 @@ function PlayerGame() {
     const session = JSON.parse(raw) as StoredSession
     setActionError('')
     setSubmitting(true)
-    setSelectedAction(action)
     try {
       await submitAction(session.sessionToken, session.player.id, action, options?.targetZoneId, options?.targetPlayerId, options?.itemId)
+      if (!action.startsWith('BATTLE_')) setTab('ACT')
     } catch (err) {
       setActionError(err instanceof Error ? err.message : 'Action failed')
-      setSelectedAction(null)
     } finally {
       setSubmitting(false)
     }
   }
 
-  return (
-    <section className="game-layout">
-      <div className="panel stack">
-        <div className="game-header">
-          <div><p className="eyebrow">ROUND {state.round} // {state.phase}</p><h2>{state.currentZone.name}</h2><p className="muted">{state.currentZone.description}</p></div>
-          <span className="status-pill">{state.status}</span>
+  const opponentName = opponents.find((opponent) => opponent.id === player.battleOpponentId)?.name ?? 'your opponent'
+  const lockedLabel = player.currentAction ? player.currentAction.replace('BATTLE_', '').replace('_', ' ') : 'DONE'
+
+  let body: ReactNode
+  if (!player.alive) {
+    body = <div className="pg-card end"><span className="pg-eyebrow">ELIMINATED</span><strong>The arena has claimed you.</strong><p>{player.lastResult}</p></div>
+  } else if (isFinished) {
+    body = <div className="pg-card end"><span className="pg-eyebrow">GAME OVER</span><strong>{state.winnerId === player.id ? 'YOU SURVIVED.' : 'THE ARENA IS CLOSED.'}</strong><p>{player.lastResult}</p></div>
+  } else if (isPaused) {
+    body = <div className="pg-card"><span className="pg-eyebrow">PAUSED</span><strong>Stand by.</strong><p>The admin paused the arena. Your timer is frozen.</p></div>
+  } else if (tab === 'FEED') {
+    body = <EventFeed events={state.events} compact />
+  } else if (tab === 'MOVE') {
+    body = (
+      <div className="pg-section">
+        <span className="pg-eyebrow">MOVE TO</span>
+        <div className="pg-move-grid">
+          {state.adjacentZones.map((zone) => (
+            <button key={zone.id} className="pg-btn" disabled={!can('MOVE')} onClick={() => void doAction('MOVE', { targetZoneId: zone.id })}>{zone.name}</button>
+          ))}
         </div>
-
-        <PlayerStats player={state.player} />
-
-        <div className="round-strip">
-          <div><span className="eyebrow">YOU</span><strong>{state.player.name}</strong><small>{state.player.id}</small></div>
-          <Countdown deadline={state.roundDeadline} serverNow={state.serverNow} durationSeconds={state.roundDurationSeconds} paused={isPaused} />
-          <div className="round-strip-right"><span>ALIVE</span><strong>{state.aliveCount}/{state.playerCount}</strong></div>
-        </div>
-        {connectionStatus !== 'CONNECTED' && <div className="connection-warning"><span className="connection-dot reconnecting" /><strong>Connection unstable.</strong><span>Your arena state will resync automatically.</span></div>}
-
-        {state.zoneHazard && state.player.alive && <div className="warning-panel"><strong>HAZARD ACTIVE</strong><span>This zone will deal {state.hazardDamage} damage at the end of the round.</span></div>}
-
-        {!state.player.alive ? (
-          <div className="eliminated-panel"><p className="eyebrow">ELIMINATED</p><h3>The arena has claimed you.</h3><p>{state.player.lastResult}</p>{state.winnerId && <p>Winner: <strong>{state.winnerId}</strong></p>}</div>
-        ) : isFinished ? (
-          <div className="event-focus"><p className="eyebrow">GAME OVER</p><h3>{state.winnerId === state.player.id ? 'YOU SURVIVED.' : 'THE ARENA IS CLOSED.'}</h3><p>{state.player.lastResult}</p></div>
-        ) : isPaused ? (
-          <div className="event-focus"><p className="eyebrow">GAME PAUSED</p><h3>Stand by.</h3><p>The admin has paused the arena. Your timer is frozen.</p></div>
-        ) : (
-          <>
-            <div className="event-focus">
-              <p className="eyebrow">YOUR CURRENT RESULT</p>
-              <h3>{selectedAction ? `ACTION: ${selectedAction}` : 'Choose carefully.'}</h3>
-              <p>{state.player.lastResult}</p>
-              <p className="minor-note">You get one action per round. Missing the timer means elimination.</p>
-            </div>
-
-            <Inventory items={state.player.inventory} disabled={!isPlayable || submitting} onUse={(itemId) => void doAction('USE_ITEM', { itemId })} />
-
-            {state.battle ? (
-              <BattlePanel
-                battle={state.battle}
-                opponent={state.visibleOpponents.find((opponent) => opponent.id === state.battle?.playerAId || opponent.id === state.battle?.playerBId)}
-                serverNow={state.serverNow}
-                durationSeconds={state.battleTurnDurationSeconds}
-                disabled={submitting || Boolean(state.battle.yourAction) || !state.availableActions.some((action) => action.startsWith('BATTLE_'))}
-                onAction={(action) => void doAction(action)}
-              />
-            ) : (
-              <>
-                <OpponentList opponents={state.visibleOpponents} disabled={!isPlayable || submitting || !state.availableActions.includes('ATTACK')} onAttack={(playerId) => void doAction('ATTACK', { targetPlayerId: playerId })} />
-
-                <div className="action-panel">
-                  <div>
-                    <div className="section-heading">WHAT DO YOU DO?</div>
-                    <p className="muted">Choose one action. Supplies can only be grabbed at the Cornucopia.</p>
-                  </div>
-                  <div className="action-grid">
-                    {['REST', 'SCOUT', 'WAIT'].map((action) => (
-                      <button key={action} className={`button action-button ${selectedAction === action ? 'selected' : ''}`} disabled={!isPlayable || submitting || !state.availableActions.includes(action)} onClick={() => void doAction(action)}>{action}</button>
-                    ))}
-                    {state.availableActions.includes('GRAB_ITEM') && <button className={`button action-button grab-action ${selectedAction === 'GRAB_ITEM' ? 'selected' : ''}`} disabled={!isPlayable || submitting} onClick={() => void doAction('GRAB_ITEM')}>GRAB ITEM</button>}
-                  </div>
-                  <div className="move-panel">
-                    <div className="section-heading">MOVE TO AN ADJACENT ZONE</div>
-                    <div className="move-grid">
-                      {state.adjacentZones.map((zone) => (
-                        <button key={zone.id} className="button button-secondary move-button" disabled={!isPlayable || submitting || !state.availableActions.includes('MOVE')} onClick={() => void doAction('MOVE', { targetZoneId: zone.id })}>
-                          <strong>{zone.name}</strong><small>{zone.description}</small>
-                        </button>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              </>
-            )}
-          </>
-        )}
-
-        {actionError && <div className="error">{actionError}</div>}
       </div>
-
-      <aside className="stack">
-        <div className="panel">
-          <div className="section-heading">CURRENT ZONE</div>
-          <p className="zone-big">{state.currentZone.name}</p>
-          <p className="muted">{state.visibleOpponents.length + 1} active player{state.visibleOpponents.length === 0 ? '' : 's'} in this zone.</p>
-          <div className="zone-mini-stats">
-            <Stat label="LOOT CACHE" value={String(state.zoneLootCount)} />
-            <Stat label="YOUR KILLS" value={String(state.player.kills)} />
+    )
+  } else if (tab === 'ITEMS') {
+    body = (
+      <div className="pg-section">
+        <span className="pg-eyebrow">BAG · {player.inventory.length}</span>
+        {player.inventory.length === 0 ? <p className="pg-note">Empty. Grab supplies at the Cornucopia.</p> : (
+          <div className="pg-items">
+            {player.inventory.map((item: InventoryItem) => (
+              <div key={item.id} className="pg-item">
+                <div><strong>{item.name}</strong><small>{item.description}</small></div>
+                <button className="pg-btn small" disabled={!can('USE_ITEM')} onClick={() => void doAction('USE_ITEM', { itemId: item.id })}>USE</button>
+              </div>
+            ))}
           </div>
+        )}
+      </div>
+    )
+  } else if (state.battle) {
+    body = (
+      <BattlePanel
+        battle={state.battle}
+        opponentName={opponentName}
+        serverNow={state.serverNow}
+        durationSeconds={state.battleTurnDurationSeconds}
+        disabled={submitting || Boolean(state.battle.yourAction) || !state.availableActions.some((action) => action.startsWith('BATTLE_'))}
+        onAction={(action) => void doAction(action)}
+      />
+    )
+  } else if (player.actionTaken) {
+    body = <div className="pg-card"><span className="pg-eyebrow">LOCKED IN</span><strong>{lockedLabel}</strong><p>Waiting for the round to end.</p></div>
+  } else {
+    body = (
+      <div className="pg-section">
+        <div className="pg-action-grid">
+          {(['REST', 'SCOUT', 'WAIT'] as const).map((action) => (
+            <button key={action} className="pg-btn" disabled={!can(action)} onClick={() => void doAction(action)}>{action}</button>
+          ))}
+          {state.availableActions.includes('GRAB_ITEM') && <button className="pg-btn grab" disabled={!can('GRAB_ITEM')} onClick={() => void doAction('GRAB_ITEM')}>GRAB ITEM</button>}
         </div>
-        <div className="panel"><EventFeed events={state.events} compact /></div>
-      </aside>
-    </section>
+        <span className="pg-eyebrow">IN YOUR ZONE · {opponents.length}</span>
+        {opponents.length === 0 ? <p className="pg-note">No one else is here.</p> : (
+          <div className="pg-attack-row">
+            <select value={targetId} onChange={(e) => setTargetId(e.target.value)} disabled={!can('ATTACK')}>
+              {opponents.map((opponent: VisibleOpponent) => <option key={opponent.id} value={opponent.id}>{opponent.name} · {opponent.health}/{opponent.maxHealth}</option>)}
+            </select>
+            <button className="pg-btn danger" disabled={!can('ATTACK') || !targetId} onClick={() => void doAction('ATTACK', { targetPlayerId: targetId })}>ATTACK</button>
+          </div>
+        )}
+      </div>
+    )
+  }
+
+  return (
+    <div className="pg">
+      <header className="pg-head">
+        <div className="pg-zone">
+          <span className="pg-eyebrow">ROUND {state.round} · {state.phase} · {state.aliveCount} ALIVE</span>
+          <strong>{state.currentZone.name}</strong>
+        </div>
+        <Countdown compact deadline={state.roundDeadline} serverNow={state.serverNow} durationSeconds={state.roundDurationSeconds} paused={isPaused} />
+      </header>
+
+      <HpBar player={player} />
+
+      {connectionStatus !== 'CONNECTED' && <div className="pg-alert conn">Reconnecting… your state will resync.</div>}
+      {state.zoneHazard && player.alive && !isFinished && <div className="pg-alert">HAZARD ZONE · −{state.hazardDamage} HP at round end</div>}
+      <p className="pg-status">{player.lastResult}</p>
+
+      <main className="pg-body">{body}</main>
+
+      {actionError && <div className="pg-error" role="alert">{actionError}</div>}
+
+      {inPlay ? (
+        <nav className="pg-tabs">
+          <button className={tab === 'ACT' ? 'active' : ''} onClick={() => setTab('ACT')}>ACT</button>
+          <button className={tab === 'MOVE' ? 'active' : ''} disabled={inBattle} onClick={() => setTab('MOVE')}>MOVE</button>
+          <button className={tab === 'ITEMS' ? 'active' : ''} disabled={inBattle} onClick={() => setTab('ITEMS')}>BAG{player.inventory.length > 0 ? ` ${player.inventory.length}` : ''}</button>
+          <button className={tab === 'FEED' ? 'active' : ''} onClick={() => setTab('FEED')}>FEED</button>
+        </nav>
+      ) : (
+        <div className="pg-feed-mini"><EventFeed events={state.events} compact /></div>
+      )}
+    </div>
   )
 }
 
@@ -481,7 +549,8 @@ function AdminPage() {
   const [selectedPlayerId, setSelectedPlayerId] = useState('')
   const [operatorValue, setOperatorValue] = useState('50')
   const [operatorAttack, setOperatorAttack] = useState('10')
-  const [operatorSpeed, setOperatorSpeed] = useState('10')
+  const [operatorDefense, setOperatorDefense] = useState('10')
+  const [operatorAgility, setOperatorAgility] = useState('10')
   const [operatorItem, setOperatorItem] = useState('MEDKIT')
   const [operatorZone, setOperatorZone] = useState('')
   const [announcement, setAnnouncement] = useState('')
@@ -575,7 +644,7 @@ function AdminPage() {
       return
     }
     if (action === 'SET_STATS') {
-      await doAction(action, { targetPlayerId: selectedPlayer.id, value: Number(operatorValue), attack: Number(operatorAttack), speed: Number(operatorSpeed) })
+      await doAction(action, { targetPlayerId: selectedPlayer.id, value: Number(operatorValue), attack: Number(operatorAttack), defense: Number(operatorDefense), agility: Number(operatorAgility) })
       return
     }
     await doAction(action, { targetPlayerId: selectedPlayer.id, value: Number(operatorValue) })
@@ -680,8 +749,9 @@ function AdminPage() {
           </div>
           <div className="operator-values">
             <label>HEALTH</label><input type="number" min="0" max="500" value={operatorValue} onChange={(e) => setOperatorValue(e.target.value)} />
-            <label>ATTACK</label><input type="number" min="1" max="100" value={operatorAttack} onChange={(e) => setOperatorAttack(e.target.value)} />
-            <label>SPEED</label><input type="number" min="1" max="100" value={operatorSpeed} onChange={(e) => setOperatorSpeed(e.target.value)} />
+            <label>ATTACK</label><input type="number" min="1" max="100" step="0.1" value={operatorAttack} onChange={(e) => setOperatorAttack(e.target.value)} />
+            <label>DEFENSE</label><input type="number" min="1" max="100" step="0.1" value={operatorDefense} onChange={(e) => setOperatorDefense(e.target.value)} />
+            <label>AGILITY</label><input type="number" min="1" max="100" step="0.1" value={operatorAgility} onChange={(e) => setOperatorAgility(e.target.value)} />
             <label>ITEM</label><select value={operatorItem} onChange={(e) => setOperatorItem(e.target.value)}>{['MEDKIT','FOOD','WEAPON','ARMOR','SPEED_BOOST'].map((item) => <option key={item}>{item}</option>)}</select>
             <label>DESTINATION</label><select value={operatorZone || selectedPlayer?.zoneId || ''} onChange={(e) => setOperatorZone(e.target.value)}>{state.zones.map((zone) => <option key={zone.id} value={zone.id}>{zone.name}</option>)}</select>
           </div>
@@ -707,10 +777,10 @@ function AdminPage() {
         <div className="table-toolbar"><div className="section-heading">PLAYERS</div><input className="table-search" value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search player, ID or zone" /></div>
         <div className="player-table-wrap">
           <table>
-            <thead><tr><th>ID</th><th>Name</th><th>Zone</th><th>HP</th><th>ATK</th><th>SPD</th><th>Items</th><th>Kills</th><th>Action</th><th>Status</th><th>Connection</th></tr></thead>
+            <thead><tr><th>ID</th><th>Name</th><th>Zone</th><th>HP</th><th>ATK</th><th>DEF</th><th>AGI</th><th>Items</th><th>Kills</th><th>Action</th><th>Status</th><th>Connection</th></tr></thead>
             <tbody>{filteredPlayers.map((player) => (
               <tr key={player.id} className={selectedPlayerId === player.id ? 'selected-row' : ''} onClick={() => setSelectedPlayerId(player.id)}>
-                <td>{player.id}</td><td>{player.name}</td><td>{player.zoneName}</td><td>{player.health}</td><td>{player.attack}</td><td>{player.speed}</td>
+                <td>{player.id}</td><td>{player.name}</td><td>{player.zoneName}</td><td>{player.health}</td><td>{fmtStat(player.attack)}</td><td>{fmtStat(player.defense)}</td><td>{fmtStat(player.agility)}</td>
                 <td>{player.inventory.length}</td><td>{player.kills}</td>
                 <td>{player.currentAction ?? (player.actionTaken ? 'DONE' : 'WAITING')}</td>
                 <td><span className={player.alive ? 'tag alive' : 'tag dead'}>{player.alive ? player.statusEffect : 'DEAD'}</span></td>
@@ -877,7 +947,7 @@ function SpectatePage() {
 
 function SpectateCombatant({ player }: { player?: SpectateState['players'][number] }) {
   if (!player) return <div className="spectate-combatant"><strong>UNKNOWN</strong><span>—</span></div>
-  return <div className="spectate-combatant"><strong>{player.name}</strong><span>{player.health}/{player.maxHealth} HP · ATK {player.attack}</span></div>
+  return <div className="spectate-combatant"><strong>{player.name}</strong><span>{player.health}/{player.maxHealth} HP · ATK {fmtStat(player.attack)}</span></div>
 }
 
 function SpectatePlayerCard({ player }: { player: SpectateState['players'][number] }) {
@@ -887,7 +957,7 @@ function SpectatePlayerCard({ player }: { player: SpectateState['players'][numbe
       <div className="spectate-player-top"><strong>{player.name}</strong><span>{player.alive ? (player.battle ? 'IN BATTLE' : player.statusEffect) : 'ELIMINATED'}</span></div>
       <div className="spectate-player-zone">{player.zoneName} · {player.id}</div>
       <div className="spectate-health"><span style={{ width: health }} /></div>
-      <div className="spectate-player-stats"><span>{player.health}/{player.maxHealth} HP</span><span>ATK {player.attack}</span><span>SPD {player.speed}</span><span>{player.inventory.length} ITEM{player.inventory.length === 1 ? '' : 'S'}</span></div>
+      <div className="spectate-player-stats"><span>{player.health}/{player.maxHealth} HP</span><span>ATK {fmtStat(player.attack)}</span><span>DEF {fmtStat(player.defense)}</span><span>AGI {fmtStat(player.agility)}</span><span>{player.inventory.length} ITEM{player.inventory.length === 1 ? '' : 'S'}</span></div>
       {player.battle && <div className="spectate-battle-note">Turn {player.battle.turn} · {player.battle.yourAction ? player.battle.yourAction.replace('BATTLE_', '') : 'CHOOSING'}</div>}
       <p>{player.lastResult}</p>
     </div>

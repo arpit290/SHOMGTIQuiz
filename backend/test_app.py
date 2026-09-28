@@ -33,7 +33,15 @@ def start_small_game(names: list[str] | None = None):
     joins = [client.post("/api/join", json={"name": name}).json() for name in names]
     started = client.post("/api/admin/action", headers=admin_header(), json={"action": "START_GAME"})
     assert started.status_code == 200
+    normalize_stats()
     return joins, started.json()
+
+
+def normalize_stats() -> None:
+    """Make combat maths deterministic: everyone gets baseline 10/10/10 stats."""
+    for player in app.game.players.values():
+        player.attack = player.defense = player.agility = 10.0
+        player.base_attack = player.base_defense = player.base_agility = 10.0
 
 
 def test_health() -> None:
@@ -59,9 +67,74 @@ def test_join_player_gets_stats_and_empty_inventory() -> None:
     player = response.json()["player"]
     assert player["id"] == "P-001"
     assert player["health"] == 100
-    assert player["attack"] == 10
-    assert player["speed"] == 10
     assert player["inventory"] == []
+    # Without an explicit choice the server hands out one HIGH / one MID / one LOW.
+    stats = sorted([player["attack"], player["defense"], player["agility"]])
+    assert stats[0] < 7 and 9 < stats[1] < 11 and stats[2] > 13
+    reset_state()
+
+
+def test_join_with_chosen_stats_applies_high_mid_low_with_small_jitter() -> None:
+    reset_state()
+    response = client.post(
+        "/api/join",
+        json={"name": "Arjun", "stats": {"attack": "HIGH", "defense": "MID", "agility": "LOW"}},
+    )
+    assert response.status_code == 200
+    player = response.json()["player"]
+    assert 14 * 0.95 <= player["attack"] <= 14 * 1.05
+    assert 10 * 0.95 <= player["defense"] <= 10 * 1.05
+    assert 6 * 0.95 <= player["agility"] <= 6 * 1.05
+    assert "speed" not in player
+    reset_state()
+
+
+def test_join_rejects_stat_choice_that_is_not_one_high_mid_low() -> None:
+    reset_state()
+    response = client.post(
+        "/api/join",
+        json={"name": "Arjun", "stats": {"attack": "HIGH", "defense": "HIGH", "agility": "LOW"}},
+    )
+    assert response.status_code == 400
+    assert app.game.players == {}
+    reset_state()
+
+
+def test_player_feed_only_contains_events_involving_that_player() -> None:
+    reset_state()
+    joins, _ = start_small_game(["Alice", "Bob", "Cara"])
+    alice, bob, cara = (app.game.players[j["player"]["id"]] for j in joins)
+    bob.zone_id = alice.zone_id = "zone_1"
+    cara.zone_id = "zone_7"
+
+    assert client.post("/api/action", headers={"X-Player-Token": cara.session_token},
+                       json={"playerId": cara.id, "action": "REST"}).status_code == 200
+    assert client.post("/api/action", headers={"X-Player-Token": alice.session_token},
+                       json={"playerId": alice.id, "action": "ATTACK", "targetPlayerId": bob.id}).status_code == 200
+    assert client.post("/api/action", headers={"X-Player-Token": alice.session_token},
+                       json={"playerId": alice.id, "action": "BATTLE_ATTACK"}).status_code == 200
+
+    def feed(player):
+        return [e["message"] for e in app.player_state(player)["events"]]
+
+    assert any("engaged" in m for m in feed(bob))
+    # Bob must not see Alice's simultaneous move before he has chosen his own.
+    assert not any("chose" in m for m in feed(bob))
+    assert any("chose ATTACK" in m for m in feed(alice))
+    assert not any("Cara" in m for m in feed(alice) + feed(bob))
+    assert not any("Alice" in m or "Bob" in m for m in feed(cara))
+    assert any("begun" in m for m in feed(cara))  # game-start is arena-wide
+    reset_state()
+
+
+def test_hazard_damage_is_reduced_by_agility() -> None:
+    reset_state()
+    joins, _ = start_small_game(["Quick", "Slow"])
+    quick = app.game.players[joins[0]["player"]["id"]]
+    slow = app.game.players[joins[1]["player"]["id"]]
+    quick.agility, slow.agility = 14.0, 6.0
+    assert app.hazard_damage_for(quick) < app.HAZARD_DAMAGE < app.hazard_damage_for(slow)
+    reset_state()
 
 
 def test_duplicate_name_rejected() -> None:
@@ -288,6 +361,7 @@ def test_use_medkit_and_speed_boost_consumes_items_and_changes_stats() -> None:
     client.post("/api/admin/action", headers=admin_header(), json={"action": "START_GAME"})
     player = app.game.players[join["player"]["id"]]
     player.health = 60
+    player.agility = 10.0
     player.inventory.append(app.make_item("MEDKIT"))
 
     medkit_id = player.inventory[0].id
@@ -311,7 +385,7 @@ def test_use_medkit_and_speed_boost_consumes_items_and_changes_stats() -> None:
         json={"playerId": player.id, "action": "USE_ITEM", "itemId": boost_id},
     )
     assert boost.status_code == 200
-    assert boost.json()["player"]["speed"] == 13
+    assert boost.json()["player"]["agility"] == 13
     assert boost.json()["player"]["inventory"] == []
     reset_state()
 
@@ -485,12 +559,13 @@ def test_admin_operator_tools_and_announcement() -> None:
     stats = client.post(
         "/api/admin/action",
         headers=admin_header(),
-        json={"action": "SET_STATS", "targetPlayerId": target_id, "value": 77, "attack": 25, "speed": 19},
+        json={"action": "SET_STATS", "targetPlayerId": target_id, "value": 77, "attack": 25, "defense": 12, "agility": 19},
     )
     assert stats.status_code == 200
     assert app.game.players[target_id].health == 77
     assert app.game.players[target_id].attack == 25
-    assert app.game.players[target_id].speed == 19
+    assert app.game.players[target_id].defense == 12
+    assert app.game.players[target_id].agility == 19
 
     announcement = client.post(
         "/api/admin/action",
