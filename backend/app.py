@@ -21,14 +21,13 @@ from pydantic import BaseModel, Field
 # Configuration
 # ---------------------------------------------------------------------------
 
-MAX_PLAYERS = int(os.getenv("MAX_PLAYERS", "250"))
+MAX_PLAYERS = 24
 ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "change-me")
 ROUND_DURATION_SECONDS = max(5, int(os.getenv("ROUND_DURATION_SECONDS", "30")))
 BATTLE_TURN_DURATION_SECONDS = max(5, int(os.getenv("BATTLE_TURN_DURATION_SECONDS", "15")))
 FINAL_PLAYER_THRESHOLD = max(2, int(os.getenv("FINAL_PLAYER_THRESHOLD", "20")))
 SUPPLY_DROP_INTERVAL = max(1, int(os.getenv("SUPPLY_DROP_INTERVAL", "3")))
-HAZARD_INTERVAL = max(1, int(os.getenv("HAZARD_INTERVAL", "4")))
-HAZARD_DAMAGE = max(1, int(os.getenv("HAZARD_DAMAGE", "8")))
+HAZARD_DAMAGE = 20  # Legacy preview value; fixed hazards below define their real effects.
 MAX_INVENTORY = max(1, int(os.getenv("MAX_INVENTORY", "1")))
 STATE_FILE = Path(os.getenv("ARENA_STATE_FILE", "arena_state.json"))
 
@@ -39,6 +38,17 @@ STAT_BASELINE = 10.0
 STAT_LEVEL_MULTIPLIERS = {"HIGH": 1.4, "MID": 1.0, "LOW": 0.6}
 STAT_JITTER = float(os.getenv("STAT_JITTER", "0.04"))  # +/-4% by default
 STAT_NAMES = ("attack", "defense", "agility")
+
+# Fixed hazard rules for the six outer zones. Hazard effects are processed at
+# the start of each round (the player's turn). The admin controls whether each
+# hazard is active.
+LIGHTNING_DAMAGE_PERCENT = 0.20
+TRACKER_JACKER_DAMAGE_PERCENT = 0.30
+POISON_DAMAGE_PERCENTS = {1: 0.07, 2: 0.15, 3: 0.25}
+TIDAL_DAMAGE_PERCENT = 0.50
+FEAR_STAT_MULTIPLIER = 0.70
+FEAR_DURATION_TURNS = 5
+POISON_DURATION_TURNS = 2
 
 rng = random.Random()
 
@@ -67,6 +77,8 @@ class ZoneDefinition:
     name: str
     description: str
     connected_zones: tuple[str, ...]
+    hazard_name: str | None = None
+    hazard_description: str | None = None
 
 
 @dataclass(frozen=True)
@@ -82,14 +94,18 @@ class Item:
     type: str
     name: str
     description: str
+    uses_remaining: int | None = None
 
-    def dict(self) -> dict[str, str]:
-        return {
+    def dict(self) -> dict[str, Any]:
+        payload: dict[str, Any] = {
             "id": self.id,
             "type": self.type,
             "name": self.name,
             "description": self.description,
         }
+        if self.uses_remaining is not None:
+            payload["usesRemaining"] = self.uses_remaining
+        return payload
 
 
 @dataclass
@@ -108,45 +124,69 @@ class Battle:
 
 
 ITEM_DEFINITIONS: dict[str, ItemDefinition] = {
-    "MEDKIT": ItemDefinition("MEDKIT", "Medkit", "Restore 30 health."),
-    "FOOD": ItemDefinition("FOOD", "Food", "Restore 12 health."),
-    "WEAPON": ItemDefinition("WEAPON", "Weapon", "Use once to permanently gain +3 Attack."),
-    "ARMOR": ItemDefinition("ARMOR", "Armor", "Use to become Armored until your next round; the next hit against you is reduced by 8 damage."),
-    "SPEED_BOOST": ItemDefinition("SPEED_BOOST", "Agility Boost", "Use once to permanently gain +3 Agility."),
+    "MEDKIT": ItemDefinition("MEDKIT", "Medkit", "Consumable. Heal 50% of your maximum health."),
+    "SHINY_SWORD": ItemDefinition("SHINY_SWORD", "Shiny Sword", "Increase Attack by 40%."),
+    "GOLDEN_APPLE": ItemDefinition("GOLDEN_APPLE", "Golden Apple", "Consumable. Boost Attack, Defense and Agility by 50% for 5 turns."),
+    "SHADOW_CLOAK": ItemDefinition("SHADOW_CLOAK", "Shadow Cloak", "Increase your chance to dodge an incoming attack by 35%."),
+    "TITAN_SHIELD": ItemDefinition("TITAN_SHIELD", "Titan Shield", "Reduce damage taken in a fight by 40%. Breaks after 7 uses."),
+    "HUNTERS_FEATHER": ItemDefinition("HUNTERS_FEATHER", "Hunter's Feather", "Gain 50% Agility, but take 50% more damage in a fight."),
+    "PHOENIX_ASHES": ItemDefinition("PHOENIX_ASHES", "Phoenix Ashes", "When you die, revive with 35% maximum health. Destroyed on use."),
+    "HEART_OF_IRON": ItemDefinition("HEART_OF_IRON", "Heart of Iron", "Increase maximum HP by 60%, but reduce Agility by 50%."),
+    "SERPENTINE_DAGGER": ItemDefinition("SERPENTINE_DAGGER", "Serpentine Dagger", "0.75x Attack. Attacks apply the Poisoned status."),
+    "BERSERKER_GAUNTLETS": ItemDefinition("BERSERKER_GAUNTLETS", "Berserker Gauntlets", "Gain 30% Attack below 50% HP and 75% Attack below 15% HP."),
+    "ADVENTURERS_BOOTS": ItemDefinition("ADVENTURERS_BOOTS", "Adventurer's Boots", "Travel up to 2 areas left or right and take 40% less environmental damage."),
+    "CROWN_OF_BLOOD": ItemDefinition("CROWN_OF_BLOOD", "Crown Of Blood", "Each kill while wearing it increases all combat stats by 30%. Must stay in the Cornucopia while equipped."),
 }
 
+CONSUMABLE_ITEM_TYPES = {"MEDKIT", "GOLDEN_APPLE"}
 
-# Twelve outer zones form a ring; the Cornucopia is the central hub.
-OUTER_ZONE_IDS = tuple(f"zone_{index}" for index in range(1, 13))
+
+# Six outer zones form a ring; the Cornucopia is the central hub.
+OUTER_ZONE_IDS = tuple(f"zone_{index}" for index in range(1, 7))
 
 
 def build_zones() -> dict[str, ZoneDefinition]:
     zones: dict[str, ZoneDefinition] = {}
     total = len(OUTER_ZONE_IDS)
 
-    descriptions = {
-        1: "Dry woodland with long sight lines.",
-        2: "Dense brush and broken ground.",
-        3: "A narrow ridge overlooking the arena.",
-        4: "Tall grass and scattered cover.",
-        5: "A shaded forest with limited visibility.",
-        6: "Rocky terrain and a shallow ravine.",
-        7: "Open scrubland with little cover.",
-        8: "A damp woodland close to the arena edge.",
-        9: "A quiet clearing surrounded by trees.",
-        10: "Uneven ground with several natural hiding spots.",
-        11: "A sparse forest crossed by a narrow trail.",
-        12: "A wind-exposed zone near the arena boundary.",
+    definitions = {
+        1: (
+            "Lightning Strikes",
+            "Every turn you begin here, there is a chance to be struck by lightning. Agility affects your odds and damage.",
+        ),
+        2: (
+            "Tracker Jacker Wasps",
+            "At the start of a turn there is a chance to be stung for 30% damage. Agility affects your odds and damage.",
+        ),
+        3: (
+            "Blood Rain",
+            "You are afflicted with fear: all stats are reduced by 30% for the next 5 turns.",
+        ),
+        4: (
+            "Poison Fog",
+            "Stay here and the poison escalates: 7% damage, then 15%, then 25% each turn while the poison lasts.",
+        ),
+        5: (
+            "Tidal Wave",
+            "Every third turn a huge wave hits everyone in the sector for 50% damage, reduced by agility.",
+        ),
+        6: (
+            "Monkey Mutations",
+            "Monkey Mutts attack every turn, dealing 5–20% damage. Agility reduces the hit.",
+        ),
     }
 
     for index, zone_id in enumerate(OUTER_ZONE_IDS, start=1):
         previous_id = OUTER_ZONE_IDS[(index - 2) % total]
         next_id = OUTER_ZONE_IDS[index % total]
+        hazard_name, hazard_description = definitions[index]
         zones[zone_id] = ZoneDefinition(
             id=zone_id,
             name=f"Zone {index}",
-            description=descriptions[index],
+            description=hazard_description,
             connected_zones=(previous_id, next_id, "cornucopia"),
+            hazard_name=hazard_name,
+            hazard_description=hazard_description,
         )
 
     zones["cornucopia"] = ZoneDefinition(
@@ -169,6 +209,8 @@ ZONES = build_zones()
 class Player:
     id: str
     name: str
+    gender: Literal["M", "F"] = "M"
+    district: int = 1
     health: int = 100
     max_health: int = 100
     attack: float = STAT_BASELINE
@@ -182,13 +224,19 @@ class Player:
     connected: bool = False
     current_action: str | None = None
     action_taken: bool = False
+    round_action_complete: bool = False
     action_deadline: datetime | None = None
     status_effect: str = "NORMAL"
+    fear_turns_remaining: int = 0
+    poison_stage: int = 0
+    poison_turns_remaining: int = 0
     last_result: str = "Waiting for the game to begin."
     joined_at: str = field(default_factory=lambda: datetime.now(timezone.utc).isoformat())
     session_token: str = field(default_factory=lambda: secrets.token_urlsafe(24))
     kills: int = 0
     inventory: list[Item] = field(default_factory=list)
+    golden_apple_turns_remaining: int = 0
+    crown_blood_stacks: int = 0
     battle_id: str | None = None
     battle_opponent_id: str | None = None
     battle_action: str | None = None
@@ -198,14 +246,27 @@ class Player:
 
     def public_dict(self) -> dict[str, Any]:
         # This object is only sent to the player themselves (or the admin).
+        status_parts: list[str] = []
+        if self.fear_turns_remaining > 0:
+            status_parts.append(f"FEAR · {self.fear_turns_remaining}T")
+        if self.poison_turns_remaining > 0:
+            label = {1: "POISONED", 2: "BADLY POISONED", 3: "SEVERELY POISONED"}.get(self.poison_stage, "POISONED")
+            status_parts.append(f"{label} · {self.poison_turns_remaining}T")
+        if self.golden_apple_turns_remaining > 0:
+            status_parts.append(f"GOLDEN APPLE · {self.golden_apple_turns_remaining}T")
+        if self.status_effect == "ARMORED":
+            status_parts.append("ARMORED")
+        status_display = " + ".join(status_parts) if status_parts else self.status_effect
         return {
             "id": self.id,
             "name": self.name,
+            "gender": self.gender,
+            "district": self.district,
             "health": self.health,
             "maxHealth": self.max_health,
-            "attack": self.attack,
-            "defense": self.defense,
-            "agility": self.agility,
+            "attack": effective_stat(self, "attack"),
+            "defense": effective_stat(self, "defense"),
+            "agility": effective_stat(self, "agility"),
             "zoneId": self.zone_id,
             "zoneName": ZONES[self.zone_id].name,
             "alive": self.alive,
@@ -213,7 +274,7 @@ class Player:
             "currentAction": self.current_action,
             "actionTaken": self.action_taken,
             "actionDeadline": self.action_deadline.isoformat() if self.action_deadline else None,
-            "statusEffect": self.status_effect,
+            "statusEffect": status_display,
             "lastResult": self.last_result,
             "kills": self.kills,
             "inventory": self.inventory_dict(),
@@ -229,6 +290,8 @@ class Player:
             "baseDefense": self.base_defense,
             "baseAgility": self.base_agility,
             "joinedAt": self.joined_at,
+            "goldenAppleTurnsRemaining": self.golden_apple_turns_remaining,
+            "crownBloodStacks": self.crown_blood_stacks,
         }
 
 
@@ -245,6 +308,7 @@ class GameState:
     event_log: list[dict[str, Any]] = field(default_factory=list)
     zone_items: dict[str, list[Item]] = field(default_factory=lambda: {zone_id: [] for zone_id in ZONES})
     hazard_zones: set[str] = field(default_factory=set)
+    hazard_counters: dict[str, int] = field(default_factory=lambda: {zone_id: 0 for zone_id in OUTER_ZONE_IDS})
     battles: dict[str, Battle] = field(default_factory=dict)
 
     @property
@@ -410,9 +474,13 @@ async def round_loop() -> None:
                     game.round_deadline is not None
                     and datetime.now(timezone.utc) >= game.round_deadline
                 )
-                if battle_expired or round_expired:
-                    if round_expired and game.status == GameStatus.ACTIVE:
-                        _resolve_round_locked()
+                if _all_round_actions_complete_locked():
+                    _resolve_round_locked(eliminate_missed=False)
+                    should_sync = True
+                elif round_expired:
+                    _resolve_round_locked(eliminate_missed=True)
+                    should_sync = True
+                elif battle_expired:
                     _write_checkpoint_locked()
                     should_sync = True
 
@@ -463,6 +531,7 @@ class StatChoice(BaseModel):
 
 class JoinRequest(BaseModel):
     name: str = Field(min_length=1, max_length=32)
+    gender: Literal["M", "F"]
     stats: StatChoice | None = None
 
 
@@ -496,8 +565,8 @@ class PlayerActionRequest(BaseModel):
 # Game engine helpers
 # ---------------------------------------------------------------------------
 
-ACTION_SET = {"MOVE", "REST", "SCOUT", "ATTACK", "USE_ITEM", "WAIT", "GRAB_ITEM"}
-BATTLE_ACTION_SET = {"BATTLE_ATTACK", "BATTLE_DEFEND", "BATTLE_RUN"}
+ACTION_SET = {"MOVE", "REST", "ATTACK", "USE_ITEM", "WAIT", "GRAB_ITEM"}
+BATTLE_ACTION_SET = {"BATTLE_ATTACK", "BATTLE_DEFEND", "BATTLE_RUN", "BATTLE_USE_ITEM"}
 
 
 def event_visible_to(event: dict[str, Any], player_id: str) -> bool:
@@ -521,14 +590,75 @@ def player_feed(player_id: str, limit: int = 30) -> list[dict[str, Any]]:
     return feed
 
 
+def has_item(player: Player, item_type: str) -> bool:
+    return any(item.type == item_type for item in player.inventory)
+
+
+def refresh_item_derived_state_locked(player: Player) -> None:
+    desired_max_health = 160 if has_item(player, "HEART_OF_IRON") else 100
+    if player.max_health != desired_max_health:
+        player.max_health = desired_max_health
+        player.health = min(player.health, player.max_health)
+
+
+def effective_stat(player: Player, stat_name: str) -> float:
+    value = float(getattr(player, stat_name))
+    if player.fear_turns_remaining > 0:
+        value *= FEAR_STAT_MULTIPLIER
+    if player.golden_apple_turns_remaining > 0:
+        value *= 1.50
+    if player.crown_blood_stacks > 0 and has_item(player, "CROWN_OF_BLOOD"):
+        value *= 1.0 + (0.30 * player.crown_blood_stacks)
+    if stat_name == "attack":
+        if has_item(player, "SHINY_SWORD"):
+            value *= 1.40
+        if has_item(player, "SERPENTINE_DAGGER"):
+            value *= 0.75
+        if has_item(player, "BERSERKER_GAUNTLETS"):
+            health_ratio = player.health / max(1, player.max_health)
+            if health_ratio < 0.15:
+                value *= 1.75
+            elif health_ratio < 0.50:
+                value *= 1.30
+    elif stat_name == "agility":
+        if has_item(player, "HUNTERS_FEATHER"):
+            value *= 1.50
+        if has_item(player, "HEART_OF_IRON"):
+            value *= 0.50
+    return value
+
+
+def environment_damage_multiplier(player: Player) -> float:
+    return 0.60 if has_item(player, "ADVENTURERS_BOOTS") else 1.0
+
+
 def mitigation_multiplier(stat: float) -> float:
-    """Damage multiplier from a defensive stat: 1.0 at baseline, 0.6 at +40%, 1.4 at -40%."""
+    """Damage multiplier from a defensive/agility stat: 1.0 at baseline, 0.6 at +40%, 1.4 at -40%."""
     return max(0.3, min(1.7, 2.0 - stat / STAT_BASELINE))
 
 
+def percent_damage_for(player: Player, percent: float, *, agility_factor: bool = True) -> int:
+    multiplier = mitigation_multiplier(effective_stat(player, "agility")) if agility_factor else 1.0
+    multiplier *= environment_damage_multiplier(player)
+    return max(1, int(round(player.max_health * percent * multiplier)))
+
+
 def hazard_damage_for(player: Player) -> int:
-    """Zone effects are softened (or worsened) by agility."""
-    return max(1, int(round(HAZARD_DAMAGE * mitigation_multiplier(player.agility))))
+    """Preview the current zone hazard's typical damage for the player's UI."""
+    zone = ZONES[player.zone_id]
+    if zone.id in game.hazard_zones:
+        if zone.id == "zone_1":
+            return percent_damage_for(player, LIGHTNING_DAMAGE_PERCENT, agility_factor=False)
+        if zone.id == "zone_2":
+            return percent_damage_for(player, TRACKER_JACKER_DAMAGE_PERCENT, agility_factor=False)
+        if zone.id == "zone_4":
+            stage = max(1, min(3, player.poison_stage or 1))
+            return percent_damage_for(player, POISON_DAMAGE_PERCENTS[stage], agility_factor=False)
+        if zone.id == "zone_5":
+            return percent_damage_for(player, TIDAL_DAMAGE_PERCENT)
+        if zone.id == "zone_6":
+            return max(1, int(round(player.max_health * 0.125)))
+    return 0
 
 
 def roll_stat(level: str) -> float:
@@ -558,6 +688,11 @@ def next_player_id() -> str:
     return f"P-{index:03d}"
 
 
+def next_district_for_gender_locked(gender: str) -> int | None:
+    occupied = {player.district for player in game.players.values() if player.gender == gender}
+    return next((district for district in range(1, 13) if district not in occupied), None)
+
+
 def make_item(item_type: str) -> Item:
     definition = ITEM_DEFINITIONS[item_type]
     return Item(
@@ -565,15 +700,12 @@ def make_item(item_type: str) -> Item:
         type=definition.type,
         name=definition.name,
         description=definition.description,
+        uses_remaining=7 if definition.type == "TITAN_SHIELD" else None,
     )
 
 
 def random_loot_type() -> str:
-    return rng.choices(
-        population=["FOOD", "MEDKIT", "WEAPON", "ARMOR", "SPEED_BOOST"],
-        weights=[28, 24, 20, 12, 16],
-        k=1,
-    )[0]
+    return rng.choice(tuple(ITEM_DEFINITIONS.keys()))
 
 
 def nearby_opponents(player: Player) -> list[Player]:
@@ -626,6 +758,17 @@ def visible_opponent_dict(player: Player) -> list[dict[str, Any]]:
     ]
 
 
+def available_move_zone_ids(player: Player) -> list[str]:
+    allowed = list(ZONES[player.zone_id].connected_zones)
+    if has_item(player, "ADVENTURERS_BOOTS") and player.zone_id != "cornucopia":
+        ring = list(OUTER_ZONE_IDS)
+        if player.zone_id in ring:
+            index = ring.index(player.zone_id)
+            expanded = [ring[(index + offset) % len(ring)] for offset in (-2, -1, 1, 2)]
+            allowed.extend(zone_id for zone_id in expanded if zone_id not in allowed)
+    return allowed
+
+
 def available_actions(player: Player) -> list[str]:
     if not player.alive or game.status != GameStatus.ACTIVE:
         return []
@@ -634,12 +777,15 @@ def available_actions(player: Player) -> list[str]:
     if battle:
         if player.battle_action:
             return []
-        return sorted(BATTLE_ACTION_SET)
+        actions = set(BATTLE_ACTION_SET)
+        if not (player.inventory and player.inventory[0].type in CONSUMABLE_ITEM_TYPES):
+            actions.discard("BATTLE_USE_ITEM")
+        return sorted(actions)
 
     if player.action_taken:
         return []
 
-    actions = {"MOVE", "REST", "SCOUT", "WAIT"}
+    actions = {"MOVE", "REST", "WAIT"}
     if nearby_opponents(player):
         actions.add("ATTACK")
     if player.inventory:
@@ -656,6 +802,8 @@ def public_zone_dict(zone: ZoneDefinition, *, include_counts: bool = False) -> d
         "name": zone.name,
         "description": zone.description,
         "connectedZones": list(zone.connected_zones),
+        "hazardName": zone.hazard_name,
+        "hazardDescription": zone.hazard_description,
     }
     if include_counts:
         payload["playerCount"] = game.zone_counts[zone.id]
@@ -679,7 +827,7 @@ def player_state(player: Player) -> dict[str, Any]:
         "player": player.public_dict(),
         "availableActions": available_actions(player),
         "currentZone": public_zone_dict(ZONES[player.zone_id]),
-        "adjacentZones": [public_zone_dict(ZONES[zone_id]) for zone_id in ZONES[player.zone_id].connected_zones],
+        "adjacentZones": [public_zone_dict(ZONES[zone_id]) for zone_id in available_move_zone_ids(player)],
         "visibleOpponents": visible_opponent_dict(player),
         "zoneLootCount": len(game.zone_items[player.zone_id]),
         "offeredItem": (
@@ -688,6 +836,8 @@ def player_state(player: Player) -> dict[str, Any]:
             else None
         ),
         "zoneHazard": player.zone_id in game.hazard_zones,
+        "hazardName": ZONES[player.zone_id].hazard_name if player.zone_id in game.hazard_zones else None,
+        "hazardDescription": ZONES[player.zone_id].hazard_description if player.zone_id in game.hazard_zones else None,
         "hazardDamage": hazard_damage_for(player),
         "playerCount": len(game.players),
         "aliveCount": game.alive_count,
@@ -701,7 +851,7 @@ def player_state(player: Player) -> dict[str, Any]:
 def admin_state() -> dict[str, Any]:
     now = datetime.now(timezone.utc)
     alive_players = [p for p in game.players.values() if p.alive]
-    acted_count = sum(1 for player in alive_players if player.action_taken)
+    acted_count = sum(1 for player in alive_players if player.round_action_complete)
     online_count = sum(1 for player in game.players.values() if player.connected)
     return {
         "gameId": game.game_id,
@@ -765,6 +915,7 @@ def _state_dict_locked() -> dict[str, Any]:
         "winnerId": game.winner_id,
         "eventLog": game.event_log[-2000:],
         "hazardZones": sorted(game.hazard_zones),
+        "hazardCounters": dict(game.hazard_counters),
         "battles": [
             {
                 "id": battle.id,
@@ -827,7 +978,12 @@ def _restore_from_checkpoint() -> None:
     game.round_number = int(raw.get("round", 0) or 0)
     game.winner_id = raw.get("winnerId")
     game.event_log.extend(raw.get("eventLog", [])[-2000:])
-    game.hazard_zones.update(zone_id for zone_id in raw.get("hazardZones", []) if zone_id in ZONES)
+    game.hazard_zones.update(zone_id for zone_id in raw.get("hazardZones", []) if zone_id in OUTER_ZONE_IDS)
+    for zone_id in OUTER_ZONE_IDS:
+        try:
+            game.hazard_counters[zone_id] = int((raw.get("hazardCounters") or {}).get(zone_id, 0)) % 3
+        except (TypeError, ValueError):
+            game.hazard_counters[zone_id] = 0
 
     for zone_id, serialized_items in raw.get("zoneItems", {}).items():
         if zone_id not in game.zone_items:
@@ -841,6 +997,7 @@ def _restore_from_checkpoint() -> None:
                         type=definition.type,
                         name=definition.name,
                         description=definition.description,
+                        uses_remaining=(int(data.get("usesRemaining", 7)) if definition.type == "TITAN_SHIELD" else None),
                     )
                 )
             except (KeyError, TypeError):
@@ -852,6 +1009,8 @@ def _restore_from_checkpoint() -> None:
             player = Player(
                 id=str(data["id"]),
                 name=str(data["name"]),
+                gender=str(data.get("gender", "M")).upper() if str(data.get("gender", "M")).upper() in {"M", "F"} else "M",
+                district=int(data.get("district", 1) or 1),
                 health=int(data.get("health", 100)),
                 max_health=int(data.get("maxHealth", 100)),
                 attack=float(data.get("attack", STAT_BASELINE)),
@@ -865,12 +1024,18 @@ def _restore_from_checkpoint() -> None:
                 connected=False,
                 current_action=data.get("currentAction"),
                 action_taken=bool(data.get("actionTaken", False)),
+                round_action_complete=bool(data.get("roundActionComplete", bool(data.get("actionTaken", False)) and not data.get("battleId"))),
                 action_deadline=None,
                 status_effect=str(data.get("statusEffect", "NORMAL")),
+                fear_turns_remaining=int(data.get("fearTurnsRemaining", 0)),
+                poison_stage=int(data.get("poisonStage", 0)),
+                poison_turns_remaining=int(data.get("poisonTurnsRemaining", 0)),
                 last_result=str(data.get("lastResult", "Recovered from the previous server session.")),
                 joined_at=joined_at,
                 session_token=str(data.get("sessionToken") or secrets.token_urlsafe(24)),
                 kills=int(data.get("kills", 0)),
+                golden_apple_turns_remaining=int(data.get("goldenAppleTurnsRemaining", 0)),
+                crown_blood_stacks=int(data.get("crownBloodStacks", 0)),
                 battle_id=data.get("battleId"),
                 battle_opponent_id=data.get("battleOpponentId"),
                 battle_action=data.get("battleAction"),
@@ -888,7 +1053,9 @@ def _restore_from_checkpoint() -> None:
                         type=definition.type,
                         name=definition.name,
                         description=definition.description,
+                        uses_remaining=(int(item_data.get("usesRemaining", 7)) if definition.type == "TITAN_SHIELD" else None),
                     ))
+            refresh_item_derived_state_locked(player)
             game.players[player.id] = player
         except (KeyError, TypeError, ValueError):
             continue
@@ -955,18 +1122,25 @@ def assign_starting_zones_locked() -> None:
     game.battles.clear()
     for index, player in enumerate(game.players.values()):
         player.zone_id = OUTER_ZONE_IDS[index % len(OUTER_ZONE_IDS)]
+        player.max_health = 100
         player.health = player.max_health
         player.attack = player.base_attack
         player.defense = player.base_defense
         player.agility = player.base_agility
         player.alive = True
         player.action_taken = False
+        player.round_action_complete = False
         player.current_action = None
         player.action_deadline = None
         player.status_effect = "NORMAL"
+        player.fear_turns_remaining = 0
+        player.poison_stage = 0
+        player.poison_turns_remaining = 0
         player.last_result = f"You begin in {ZONES[player.zone_id].name}."
         player.kills = 0
         player.inventory.clear()
+        player.golden_apple_turns_remaining = 0
+        player.crown_blood_stacks = 0
         player.battle_id = None
         player.battle_opponent_id = None
         player.battle_action = None
@@ -974,6 +1148,7 @@ def assign_starting_zones_locked() -> None:
     for zone_id in game.zone_items:
         game.zone_items[zone_id].clear()
     game.hazard_zones.clear()
+    game.hazard_counters = {zone_id: 0 for zone_id in OUTER_ZONE_IDS}
 
     # Small opening cache so the central area is worth contesting early.
     for _ in range(8):
@@ -1030,36 +1205,38 @@ def _begin_round_locked() -> None:
 
     for player in game.players.values():
         if player.alive:
+            refresh_item_derived_state_locked(player)
+            if player.golden_apple_turns_remaining > 0:
+                player.golden_apple_turns_remaining -= 1
+            player.round_action_complete = False
             if get_battle_locked(player):
                 player.current_action = "BATTLE"
                 player.action_taken = True
                 player.action_deadline = game.battles[player.battle_id].deadline if player.battle_id in game.battles else game.round_deadline
-                if player.status_effect == "ARMORED":
-                    player.status_effect = "NORMAL"
                 player.last_result = f"Battle with {game.players[player.battle_opponent_id].name} continues. Choose a combat move." if player.battle_opponent_id in game.players else "Your battle continues."
                 continue
             player.current_action = None
             player.action_taken = False
             player.action_deadline = game.round_deadline
             if player.status_effect == "ARMORED":
-                # Armor lasts through the round in which it was used; it is cleared
-                # at the next round start if it survived unused.
                 player.status_effect = "NORMAL"
             player.last_result = f"Round {game.round_number} has begun. Choose your action."
         else:
             player.action_deadline = None
 
-    if game.round_number > 1 and game.round_number % SUPPLY_DROP_INTERVAL == 0:
-        _spawn_supply_drops_locked()
-    if game.round_number > 1 and game.round_number % HAZARD_INTERVAL == 0:
-        _spawn_hazards_locked()
-    else:
-        game.hazard_zones.clear()
+    hazard_events = _apply_hazards_at_round_start_locked()
+    if game.alive_count <= 1:
+        _finish_game_locked()
+        return
 
     game.add_event(
         f"Round {game.round_number} has begun. Players have {ROUND_DURATION_SECONDS} seconds to act.",
         "ROUND_STARTED",
     )
+
+    # Hazard events are already logged individually; return value retained for
+    # readability/testing even though the shared event feed picks them up.
+    _ = hazard_events
 
 
 def _clear_battle_players_locked(battle: Battle, *, ended_action_round: bool) -> None:
@@ -1073,13 +1250,15 @@ def _clear_battle_players_locked(battle: Battle, *, ended_action_round: bool) ->
         player.current_action = None
         player.action_deadline = game.round_deadline if game.status == GameStatus.ACTIVE else None
         player.action_taken = ended_action_round
+        player.round_action_complete = ended_action_round
 
 
-def _end_battle_locked(battle_id: str, *, reason: str | None = None) -> None:
+def _end_battle_locked(battle_id: str, *, reason: str | None = None, ended_action_round: bool = True) -> None:
     battle = game.battles.pop(battle_id, None)
     if not battle:
         return
-    ended_action_round = game.round_number == battle.started_round
+    # Any resolved/administratively ended battle consumes the current round's
+    # action, even when the battle itself began in an earlier round.
     _clear_battle_players_locked(battle, ended_action_round=ended_action_round)
     if reason:
         game.add_event(reason, "BATTLE_ENDED", player_ids=battle.participant_ids())
@@ -1112,6 +1291,21 @@ def _finish_game_locked() -> None:
 def _eliminate_player_locked(player: Player, reason: str, *, killer: Player | None = None) -> dict[str, Any]:
     if not player.alive:
         return game.add_event(f"{player.name} was already eliminated.", "INFO", player_ids=(player.id,))
+
+    phoenix_index = next((index for index, item in enumerate(player.inventory) if item.type == "PHOENIX_ASHES"), None)
+    if phoenix_index is not None:
+        player.inventory.pop(phoenix_index)
+        refresh_item_derived_state_locked(player)
+        player.health = max(1, int(round(player.max_health * 0.35)))
+        player.alive = True
+        player.status_effect = "NORMAL"
+        player.last_result = f"Phoenix Ashes saved you. You revived with {player.health} HP."
+        return game.add_event(
+            f"Phoenix Ashes revived {player.name} with {player.health} HP.",
+            "PLAYER_REVIVED",
+            player_ids=(player.id,) if killer is None else (player.id, killer.id),
+        )
+
     player.alive = False
     player.health = 0
     player.action_deadline = None
@@ -1126,55 +1320,217 @@ def _eliminate_player_locked(player: Player, reason: str, *, killer: Player | No
         )
     if killer is not None and killer.id != player.id:
         killer.kills += 1
+        if has_item(killer, "CROWN_OF_BLOOD"):
+            killer.crown_blood_stacks += 1
     involved = [player.id] + ([killer.id] if killer is not None else [])
     return game.add_event(reason, "PLAYER_ELIMINATED", player_ids=involved)
 
 
-def _apply_hazard_damage_locked() -> list[dict[str, Any]]:
+def _apply_hazards_at_round_start_locked() -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
-    if not game.hazard_zones:
-        return events
+
+    # Tidal Wave advances once per round for the whole zone, not once per player.
+    # That keeps the 3-turn warning cycle identical whether zero, one, or many
+    # players are standing in Zone 5.
+    tidal_counter = None
+    if "zone_5" in game.hazard_zones:
+        tidal_counter = (game.hazard_counters.get("zone_5", 0) % 3) + 1
+        game.hazard_counters["zone_5"] = tidal_counter
 
     for player in list(game.players.values()):
-        if not player.alive or player.zone_id not in game.hazard_zones:
+        if not player.alive:
             continue
-        old_health = player.health
-        player.health = max(0, player.health - hazard_damage_for(player))
-        player.last_result = f"The hazard in {ZONES[player.zone_id].name} dealt {old_health - player.health} damage."
-        events.append(game.add_event(
-            f"{player.name} took {old_health - player.health} hazard damage in {ZONES[player.zone_id].name}.",
-            "HAZARD_DAMAGE",
-            player_ids=(player.id,),
-        ))
-        if player.health <= 0:
-            events.append(_eliminate_player_locked(
-                player,
-                f"{player.name} ({player.id}) was eliminated by the arena hazard in {ZONES[player.zone_id].name}.",
+
+        active_hazard = player.zone_id if player.zone_id in game.hazard_zones else None
+        zone = ZONES[player.zone_id]
+
+        # Poison is a lingering effect for two turns after each exposure. If the
+        # player starts another turn in the fog, the poison escalates first.
+        in_poison_fog = active_hazard == "zone_4"
+        if in_poison_fog:
+            player.poison_stage = min(3, max(1, player.poison_stage + 1))
+            player.poison_turns_remaining = POISON_DURATION_TURNS
+            messages = {
+                1: "You feel a poison spreading throughout your body.",
+                2: "A very potent poison is burning through your veins. You need to run!",
+                3: "Your body is full of poison.",
+            }
+            labels = {1: "POISONED", 2: "BADLY POISONED", 3: "SEVERELY POISONED"}
+            player.status_effect = labels[player.poison_stage]
+            events.append(game.add_event(messages[player.poison_stage], "HAZARD_WARNING", player_ids=(player.id,)))
+            player.last_result = messages[player.poison_stage]
+
+        if player.poison_turns_remaining > 0:
+            stage = max(1, min(3, player.poison_stage))
+            damage = percent_damage_for(player, POISON_DAMAGE_PERCENTS[stage], agility_factor=False)
+            old_health = player.health
+            player.health = max(0, player.health - damage)
+            player.poison_turns_remaining -= 1
+            if player.poison_turns_remaining <= 0:
+                player.poison_stage = 0
+                if player.status_effect in {"POISONED", "BADLY POISONED", "SEVERELY POISONED"}:
+                    player.status_effect = "NORMAL"
+            player.last_result = f"{player.last_result} You take {old_health - player.health} poison damage." if old_health != player.health else player.last_result
+            events.append(game.add_event(
+                f"{player.name} took {old_health - player.health} poison damage in {zone.name}.",
+                "HAZARD_DAMAGE",
+                player_ids=(player.id,),
             ))
+            if player.health <= 0:
+                events.append(_eliminate_player_locked(
+                    player,
+                    f"{player.name} ({player.id}) was eliminated by poison.",
+                ))
+                continue
+
+        # Blood Rain refreshes a five-turn fear effect each turn spent in it.
+        if active_hazard == "zone_3":
+            player.fear_turns_remaining = FEAR_DURATION_TURNS
+            player.last_result = "The Blood Rain fills you with fear. All stats are reduced by 30% for 5 turns."
+            events.append(game.add_event(
+                "The Blood Rain affected you with FEAR: all stats are reduced by 30% for 5 turns.",
+                "HAZARD_FEAR",
+                player_ids=(player.id,),
+            ))
+
+        # Lightning: a chance to be hit, with agility improving survival.
+        if active_hazard == "zone_1":
+            chance = max(0.15, min(0.75, 0.45 - (effective_stat(player, "agility") - STAT_BASELINE) * 0.025))
+            if rng.random() < chance:
+                damage = percent_damage_for(player, LIGHTNING_DAMAGE_PERCENT, agility_factor=False)
+                old_health = player.health
+                player.health = max(0, player.health - damage)
+                player.last_result = f"Lightning struck you for {old_health - player.health} damage!"
+                events.append(game.add_event(
+                    f"{player.name} was struck by lightning for {old_health - player.health} damage in {zone.name}.",
+                    "HAZARD_DAMAGE",
+                    player_ids=(player.id,),
+                ))
+                if player.health <= 0:
+                    events.append(_eliminate_player_locked(player, f"{player.name} ({player.id}) was eliminated by a lightning strike in {zone.name}."))
+                    continue
+            else:
+                player.last_result = "You hear thunder overhead, but the lightning misses you."
+                events.append(game.add_event("Lightning cracked nearby, but you were spared.", "HAZARD_MISSED", player_ids=(player.id,)))
+
+        # Tracker Jackers: a chance to be stung for 30% damage.
+        elif active_hazard == "zone_2":
+            chance = max(0.20, min(0.80, 0.50 - (effective_stat(player, "agility") - STAT_BASELINE) * 0.03))
+            if rng.random() < chance:
+                damage = percent_damage_for(player, TRACKER_JACKER_DAMAGE_PERCENT, agility_factor=False)
+                old_health = player.health
+                player.health = max(0, player.health - damage)
+                player.last_result = f"Tracker Jacker Wasps stung you for {old_health - player.health} damage!"
+                events.append(game.add_event(
+                    f"Tracker Jacker Wasps stung {player.name} for {old_health - player.health} damage in {zone.name}.",
+                    "HAZARD_DAMAGE",
+                    player_ids=(player.id,),
+                ))
+                if player.health <= 0:
+                    events.append(_eliminate_player_locked(player, f"{player.name} ({player.id}) was eliminated by Tracker Jacker Wasps in {zone.name}."))
+                    continue
+            else:
+                player.last_result = "You hear the Tracker Jacker swarm, but the wasps miss you."
+                events.append(game.add_event("The Tracker Jacker swarm passes without a sting.", "HAZARD_MISSED", player_ids=(player.id,)))
+
+        # Tidal Wave counter: one warning per turn, then the wave hits on 3.
+        elif active_hazard == "zone_5":
+            counter = tidal_counter or 1
+            if counter == 1:
+                player.last_result = "You feel a small vibration in the ground."
+                events.append(game.add_event("You feel a small vibration in the ground.", "HAZARD_WARNING", player_ids=(player.id,)))
+            elif counter == 2:
+                player.last_result = "You see a wave of water in the distance."
+                events.append(game.add_event("You see a wave of water in the distance.", "HAZARD_WARNING", player_ids=(player.id,)))
+            else:
+                damage = percent_damage_for(player, TIDAL_DAMAGE_PERCENT)
+                old_health = player.health
+                player.health = max(0, player.health - damage)
+                player.last_result = f"A huge tidal wave slams into you for {old_health - player.health} damage!"
+                events.append(game.add_event(
+                    f"A huge tidal wave slammed into {player.name} for {old_health - player.health} damage in {zone.name}.",
+                    "HAZARD_DAMAGE",
+                    player_ids=(player.id,),
+                ))
+                if player.health <= 0:
+                    events.append(_eliminate_player_locked(player, f"{player.name} ({player.id}) was eliminated by the tidal wave in {zone.name}."))
+                    continue
+
+        # Monkey Mutts: random 5–20% hit, kept within that range after agility.
+        elif active_hazard == "zone_6":
+            base_percent = rng.uniform(0.05, 0.20)
+            agility_scale = 1.0 - (effective_stat(player, "agility") - STAT_BASELINE) * 0.025
+            final_percent = max(0.05, min(0.20, base_percent * agility_scale))
+            damage = max(1, int(round(player.max_health * final_percent * environment_damage_multiplier(player))))
+            old_health = player.health
+            player.health = max(0, player.health - damage)
+            player.last_result = f"Monkey Mutts attacked you for {old_health - player.health} damage!"
+            events.append(game.add_event(
+                f"Monkey Mutts attacked {player.name} for {old_health - player.health} damage in {zone.name}.",
+                "HAZARD_DAMAGE",
+                player_ids=(player.id,),
+            ))
+            if player.health <= 0:
+                events.append(_eliminate_player_locked(player, f"{player.name} ({player.id}) was eliminated by Monkey Mutts in {zone.name}."))
+                continue
+
+        # Count this turn against FEAR. Blood Rain refreshes the effect to five
+        # turns at the start, then the current turn consumes one of them.
+        if player.fear_turns_remaining > 0:
+            player.fear_turns_remaining = max(0, player.fear_turns_remaining - 1)
+
+    if tidal_counter == 3:
+        game.hazard_counters["zone_5"] = 0
+
+        # If poison is gone and no other temporary effect is active, clear the stale display.
+        if player.poison_turns_remaining <= 0 and player.status_effect == "POISONED":
+            player.status_effect = "NORMAL"
+
     return events
 
 
-def _resolve_round_locked() -> None:
+def _all_round_actions_complete_locked() -> bool:
+    if game.status != GameStatus.ACTIVE or game.alive_count <= 1:
+        return False
+    return all(player.round_action_complete for player in game.players.values() if player.alive)
+
+
+def _resolve_round_locked(*, eliminate_missed: bool = True) -> None:
     if game.status != GameStatus.ACTIVE:
         return
+
+    # If the round timer ends while a battle turn is still waiting, resolve missing
+    # combat choices as DEFEND so battles also complete their current round action.
+    if eliminate_missed:
+        for battle in list(game.battles.values()):
+            if len(battle.actions) < 2:
+                for player_id in battle.participant_ids():
+                    player = game.players.get(player_id)
+                    if player and player.alive and player_id not in battle.actions:
+                        battle.actions[player_id] = "BATTLE_DEFEND"
+                        player.battle_action = "BATTLE_DEFEND"
+                        player.last_result = "The round ended while you were thinking, so you defended automatically."
+                _resolve_battle_turn_locked(battle)
 
     missed: list[Player] = [
         player
         for player in game.players.values()
-        if player.alive and not player.action_taken and not player.battle_id
+        if player.alive and not player.round_action_complete and not player.battle_id
     ]
 
-    for player in missed:
-        _eliminate_player_locked(
-            player,
-            f"{player.name} ({player.id}) failed to act before the timer expired and was eliminated.",
-        )
-
-    _apply_hazard_damage_locked()
+    if eliminate_missed:
+        for player in missed:
+            _eliminate_player_locked(
+                player,
+                f"{player.name} ({player.id}) failed to act before the timer expired and was eliminated.",
+            )
 
     if game.alive_count <= 1:
         _finish_game_locked()
         return
+
+    if not eliminate_missed:
+        game.add_event("All living players have acted. The round ends automatically.", "ROUND_AUTO_END")
 
     game.round_number += 1
     _begin_round_locked()
@@ -1196,8 +1552,13 @@ def _validate_player_action_locked(
 
     battle = get_battle_locked(player)
     if battle:
-        if action not in BATTLE_ACTION_SET:
-            return False, "You are engaged in battle. Only ATTACK, DEFEND, or RUN are available."
+        allowed_battle_actions = set(BATTLE_ACTION_SET)
+        if player.inventory and player.inventory[0].type in CONSUMABLE_ITEM_TYPES:
+            allowed_battle_actions.add("BATTLE_USE_ITEM")
+        if action not in allowed_battle_actions:
+            return False, "You are engaged in battle. Only ATTACK, DEFEND, RUN, or a consumable item are available."
+        if action == "BATTLE_USE_ITEM" and player.inventory[0].type == "MEDKIT" and player.health >= player.max_health:
+            return False, "Your health is already full."
         if player.battle_action:
             return False, "You have already chosen a combat move for this battle turn."
         if battle.deadline and datetime.now(timezone.utc) >= battle.deadline:
@@ -1219,7 +1580,17 @@ def _validate_player_action_locked(
     if action == "MOVE":
         if not target_zone_id or target_zone_id not in ZONES:
             return False, "Choose a destination zone."
-        if target_zone_id not in ZONES[player.zone_id].connected_zones:
+        if has_item(player, "CROWN_OF_BLOOD") and player.zone_id == "cornucopia" and target_zone_id != "cornucopia":
+            return False, "The Crown Of Blood cannot leave the Cornucopia while equipped."
+        allowed_zones = set(ZONES[player.zone_id].connected_zones)
+        if has_item(player, "ADVENTURERS_BOOTS") and player.zone_id != "cornucopia":
+            ring = list(OUTER_ZONE_IDS)
+            if player.zone_id in ring:
+                index = ring.index(player.zone_id)
+                for offset in (-2, -1, 1, 2):
+                    candidate = ring[(index + offset) % len(ring)]
+                    allowed_zones.add(candidate)
+        if target_zone_id not in allowed_zones:
             return False, "You cannot move directly to that zone."
 
     if action == "ATTACK":
@@ -1249,29 +1620,61 @@ def _validate_player_action_locked(
             return False, "That item is no longer in your inventory."
         if item.type == "MEDKIT" and player.health >= player.max_health:
             return False, "Your health is already full."
-        if item.type == "FOOD" and player.health >= player.max_health:
-            return False, "Your health is already full."
+        if item.type not in CONSUMABLE_ITEM_TYPES:
+            return False, "That item is automatically active while you hold it."
 
     return True, ""
 
 
 def _attack_damage_locked(attacker: Player, defender: Player, *, defense: bool = False) -> tuple[int, bool, int]:
-    raw = max(1, int(round(attacker.attack)) + rng.randint(-2, 4))
-    critical = rng.random() < 0.12
+    # Tuned so equal mid-stat players usually need about four to five landed hits.
+    raw = max(1, 11 + int(round(effective_stat(attacker, "attack"))) + rng.randint(-2, 2))
+    critical = rng.random() < 0.10
     if critical:
-        raw += max(3, int(attacker.attack // 2))
+        raw += 5
 
-    # The defender's DEFENSE stat passively mitigates every incoming hit.
-    raw = max(1, int(round(raw * mitigation_multiplier(defender.defense))))
+    raw = max(1, int(round(raw * mitigation_multiplier(effective_stat(defender, "defense")))))
+
+    # Agility provides a small baseline dodge chance; Shadow Cloak makes that chance 35% higher.
+    base_dodge = max(0.03, min(0.30, 0.08 + (effective_stat(defender, "agility") - STAT_BASELINE) * 0.012))
+    dodge_chance = base_dodge * 1.35 if has_item(defender, "SHADOW_CLOAK") else base_dodge
+    if rng.random() < min(0.45, dodge_chance):
+        return 0, False, 0
 
     reduction = 0
     if defense:
-        reduction += max(5, int(raw * 0.55))
+        reduction += max(4, int(round(raw * 0.50)))
     if defender.status_effect == "ARMORED":
         reduction += 8
         defender.status_effect = "NORMAL"
 
+    shield = next((item for item in defender.inventory if item.type == "TITAN_SHIELD"), None)
+    if shield is not None:
+        raw = max(1, int(round(raw * 0.60)))
+        shield.uses_remaining = max(0, (shield.uses_remaining if shield.uses_remaining is not None else 7) - 1)
+        if shield.uses_remaining == 0:
+            defender.inventory.remove(shield)
+            defender.last_result = "Your Titan Shield broke after 7 uses."
+            refresh_item_derived_state_locked(defender)
+
+    if has_item(defender, "HUNTERS_FEATHER"):
+        raw = max(1, int(round(raw * 1.50)))
+
     return max(1, raw - reduction), critical, reduction
+
+
+def _apply_serpentine_poison_on_hit_locked(attacker: Player, defender: Player) -> dict[str, Any] | None:
+    if not has_item(attacker, "SERPENTINE_DAGGER") or not defender.alive:
+        return None
+    defender.poison_stage = max(1, defender.poison_stage)
+    defender.poison_turns_remaining = max(2, defender.poison_turns_remaining)
+    defender.status_effect = "POISONED"
+    defender.last_result = f"{attacker.name}'s Serpentine Dagger poisoned you."
+    return game.add_event(
+        f"{attacker.name} applied POISONED to {defender.name} with the Serpentine Dagger.",
+        "STATUS_APPLIED",
+        player_ids=(attacker.id, defender.id),
+    )
 
 
 def _resolve_battle_turn_locked(battle: Battle) -> list[dict[str, Any]]:
@@ -1290,6 +1693,14 @@ def _resolve_battle_turn_locked(battle: Battle) -> list[dict[str, Any]]:
         return game.add_event(message, event_type, player_ids=(player_a.id, player_b.id))
 
     events: list[dict[str, Any]] = []
+
+    # Consumables may be used as a battle move. They resolve before attack damage
+    # for this turn, and using one consumes the combatant's move.
+    if action_a == "BATTLE_USE_ITEM" and player_a.inventory:
+        events.append(_use_item_locked(player_a, player_a.inventory[0].id))
+    if action_b == "BATTLE_USE_ITEM" and player_b.inventory:
+        events.append(_use_item_locked(player_b, player_b.inventory[0].id))
+
     if action_a == "BATTLE_RUN" or action_b == "BATTLE_RUN":
         runners = [(player_a, player_b, action_a), (player_b, player_a, action_b)]
         for runner, opponent, runner_action in runners:
@@ -1325,29 +1736,45 @@ def _resolve_battle_turn_locked(battle: Battle) -> list[dict[str, Any]]:
                 player_a.health = max(0, player_a.health - damage)
                 player_b.last_result = f"You caught {player_a.name} while they ran for {damage} damage."
                 player_a.last_result = f"You failed to run and took {damage} damage from {player_b.name}."
-                events.append(_log(
-                    f"{player_b.name} struck {player_a.name} for {damage} damage as they tried to run.{(' Critical hit.' if critical else '')}{(' Armor helped.' if reduction else '')}",
-                    "BATTLE_HIT",
-                ))
+                if damage == 0:
+                    events.append(_log(f"{player_a.name} dodged {player_b.name}'s attack while trying to run.", "BATTLE_DODGE"))
+                else:
+                    events.append(_log(
+                        f"{player_b.name} struck {player_a.name} for {damage} damage as they tried to run.{(' Critical hit.' if critical else '')}{(' Armor helped.' if reduction else '')}",
+                        "BATTLE_HIT",
+                    ))
+                if damage > 0:
+                    poison_event = _apply_serpentine_poison_on_hit_locked(player_b, player_a)
+                    if poison_event:
+                        events.append(poison_event)
                 if player_a.health <= 0:
                     events.append(_eliminate_player_locked(player_a, f"{player_a.name} ({player_a.id}) was eliminated by {player_b.name} in battle.", killer=player_b))
-                    if game.alive_count <= 1:
-                        _finish_game_locked()
-                    return events
+                    if not player_a.alive:
+                        if game.alive_count <= 1:
+                            _finish_game_locked()
+                        return events
         elif action_b == "BATTLE_RUN" and action_a == "BATTLE_ATTACK" and player_b.alive:
             damage, critical, reduction = _attack_damage_locked(player_a, player_b)
             player_b.health = max(0, player_b.health - damage)
             player_a.last_result = f"You caught {player_b.name} while they ran for {damage} damage."
             player_b.last_result = f"You failed to run and took {damage} damage from {player_a.name}."
-            events.append(_log(
-                f"{player_a.name} struck {player_b.name} for {damage} damage as they tried to run.{(' Critical hit.' if critical else '')}{(' Armor helped.' if reduction else '')}",
-                "BATTLE_HIT",
-            ))
+            if damage == 0:
+                events.append(_log(f"{player_b.name} dodged {player_a.name}'s attack while trying to run.", "BATTLE_DODGE"))
+            else:
+                events.append(_log(
+                    f"{player_a.name} struck {player_b.name} for {damage} damage as they tried to run.{(' Critical hit.' if critical else '')}{(' Armor helped.' if reduction else '')}",
+                    "BATTLE_HIT",
+                ))
+            if damage > 0:
+                poison_event = _apply_serpentine_poison_on_hit_locked(player_a, player_b)
+                if poison_event:
+                    events.append(poison_event)
             if player_b.health <= 0:
                 events.append(_eliminate_player_locked(player_b, f"{player_b.name} ({player_b.id}) was eliminated by {player_a.name} in battle.", killer=player_a))
-                if game.alive_count <= 1:
-                    _finish_game_locked()
-                return events
+                if not player_b.alive:
+                    if game.alive_count <= 1:
+                        _finish_game_locked()
+                    return events
     else:
         # Both combatants commit simultaneously. Defending reduces incoming
         # damage by 55%; armor adds its existing 8-point reduction once.
@@ -1356,29 +1783,45 @@ def _resolve_battle_turn_locked(battle: Battle) -> list[dict[str, Any]]:
             player_b.health = max(0, player_b.health - damage)
             player_a.last_result = f"You attacked {player_b.name} for {damage} damage."
             player_b.last_result = f"{player_a.name} attacked you for {damage} damage."
-            events.append(_log(
-                f"{player_a.name} attacked {player_b.name} for {damage} damage.{(' Critical hit.' if critical else '')}{(' Defense/armor reduced the hit.' if reduction else '')}",
-                "BATTLE_HIT",
-            ))
+            if damage == 0:
+                events.append(_log(f"{player_b.name} dodged {player_a.name}'s attack.", "BATTLE_DODGE"))
+            else:
+                events.append(_log(
+                    f"{player_a.name} attacked {player_b.name} for {damage} damage.{(' Critical hit.' if critical else '')}{(' Defense/armor reduced the hit.' if reduction else '')}",
+                    "BATTLE_HIT",
+                ))
+            if damage > 0:
+                poison_event = _apply_serpentine_poison_on_hit_locked(player_a, player_b)
+                if poison_event:
+                    events.append(poison_event)
             if player_b.health <= 0:
                 events.append(_eliminate_player_locked(player_b, f"{player_b.name} ({player_b.id}) was eliminated by {player_a.name} in battle.", killer=player_a))
-                if game.alive_count <= 1:
-                    _finish_game_locked()
-                return events
+                if not player_b.alive:
+                    if game.alive_count <= 1:
+                        _finish_game_locked()
+                    return events
         if action_b == "BATTLE_ATTACK" and player_a.alive and player_b.alive:
             damage, critical, reduction = _attack_damage_locked(player_b, player_a, defense=action_a == "BATTLE_DEFEND")
             player_a.health = max(0, player_a.health - damage)
             player_b.last_result = f"You attacked {player_a.name} for {damage} damage."
             player_a.last_result = f"{player_b.name} attacked you for {damage} damage."
-            events.append(_log(
-                f"{player_b.name} attacked {player_a.name} for {damage} damage.{(' Critical hit.' if critical else '')}{(' Defense/armor reduced the hit.' if reduction else '')}",
-                "BATTLE_HIT",
-            ))
+            if damage == 0:
+                events.append(_log(f"{player_a.name} dodged {player_b.name}'s attack.", "BATTLE_DODGE"))
+            else:
+                events.append(_log(
+                    f"{player_b.name} attacked {player_a.name} for {damage} damage.{(' Critical hit.' if critical else '')}{(' Defense/armor reduced the hit.' if reduction else '')}",
+                    "BATTLE_HIT",
+                ))
+            if damage > 0:
+                poison_event = _apply_serpentine_poison_on_hit_locked(player_b, player_a)
+                if poison_event:
+                    events.append(poison_event)
             if player_a.health <= 0:
                 events.append(_eliminate_player_locked(player_a, f"{player_a.name} ({player_a.id}) was eliminated by {player_b.name} in battle.", killer=player_b))
-                if game.alive_count <= 1:
-                    _finish_game_locked()
-                return events
+                if not player_a.alive:
+                    if game.alive_count <= 1:
+                        _finish_game_locked()
+                    return events
 
         if action_a == action_b == "BATTLE_DEFEND" and player_a.alive and player_b.alive:
             player_a.last_result = f"You defended against {player_b.name}."
@@ -1391,6 +1834,7 @@ def _resolve_battle_turn_locked(battle: Battle) -> list[dict[str, Any]]:
     for player in (player_a, player_b):
         if player.alive:
             player.battle_action = None
+            player.round_action_complete = True
 
     if not player_a.alive or not player_b.alive:
         _end_battle_locked(battle.id)
@@ -1403,7 +1847,10 @@ def _resolve_battle_turn_locked(battle: Battle) -> list[dict[str, Any]]:
         player.current_action = "BATTLE"
         player.action_taken = True
         player.action_deadline = battle.deadline
-        player.last_result = f"Battle turn {battle.turn_number}: choose ATTACK, DEFEND, or RUN."
+        battle_options = "ATTACK, DEFEND, RUN"
+        if player.inventory and player.inventory[0].type in CONSUMABLE_ITEM_TYPES:
+            battle_options += ", or USE ITEM"
+        player.last_result = f"Battle turn {battle.turn_number}: choose {battle_options}."
     events.append(_log(
         f"Battle between {player_a.name} and {player_b.name} moves to turn {battle.turn_number}.",
         "BATTLE_TURN",
@@ -1435,25 +1882,17 @@ def _use_item_locked(player: Player, item_id: str) -> dict[str, Any]:
     item = player.inventory[item_index]
     if item.type == "MEDKIT":
         old_health = player.health
-        player.health = min(player.max_health, player.health + 30)
+        heal = int(round(player.max_health * 0.50))
+        player.health = min(player.max_health, player.health + heal)
         player.last_result = f"You used a Medkit and recovered {player.health - old_health} health."
-    elif item.type == "FOOD":
-        old_health = player.health
-        player.health = min(player.max_health, player.health + 12)
-        player.last_result = f"You ate and recovered {player.health - old_health} health."
-    elif item.type == "WEAPON":
-        player.attack += 3
-        player.last_result = "You equipped the Weapon. Attack increased by 3."
-    elif item.type == "ARMOR":
-        player.status_effect = "ARMORED"
-        player.last_result = "You prepared the Armor. The next hit against you will be reduced by 8 damage."
-    elif item.type == "SPEED_BOOST":
-        player.agility += 3
-        player.last_result = "You used the Agility Boost. Agility increased by 3."
+    elif item.type == "GOLDEN_APPLE":
+        player.golden_apple_turns_remaining = 5
+        player.last_result = "You ate the Golden Apple. All combat stats are boosted by 50% for 5 turns."
     else:
-        raise HTTPException(status_code=409, detail="Unknown item.")
+        raise HTTPException(status_code=409, detail="That item is automatically active while you hold it.")
 
     player.inventory.pop(item_index)
+    refresh_item_derived_state_locked(player)
     return game.add_event(f"{player.name} used a {item.name} in {ZONES[player.zone_id].name}.", "ITEM_USED", player_ids=(player.id,))
 
 
@@ -1470,11 +1909,13 @@ def _grab_item_locked(player: Player) -> dict[str, Any]:
         dropped = player.inventory.pop(0)
         game.zone_items["cornucopia"].append(dropped)  # goes to the back of the pile
         player.inventory.append(item)
+        refresh_item_derived_state_locked(player)
         player.last_result = f"You swapped your {dropped.name} for a {item.name}. {item.description}"
         message = f"{player.name} swapped a {dropped.name} for a {item.name} at the Cornucopia."
         return game.add_event(message, "ITEM_SWAPPED", player_ids=(player.id,))
 
     player.inventory.append(item)
+    refresh_item_derived_state_locked(player)
     player.last_result = f"You grabbed a {item.name}. {item.description}"
     return game.add_event(f"{player.name} grabbed a {item.name} from the Cornucopia.", "ITEM_GRABBED", player_ids=(player.id,))
 
@@ -1513,6 +1954,7 @@ def _apply_player_action_locked(
 
     player.current_action = action
     player.action_taken = True
+    player.round_action_complete = True
     player.action_deadline = None
 
     if action == "MOVE":
@@ -1525,11 +1967,6 @@ def _apply_player_action_locked(
         player.health = min(player.max_health, player.health + 5)
         player.last_result = f"You rested and recovered {player.health - old_health} health."
         event = game.add_event(f"{player.name} rested in {ZONES[player.zone_id].name}.", "PLAYER_RESTED", player_ids=(player.id,))
-    elif action == "SCOUT":
-        adjacent = ZONES[player.zone_id].connected_zones
-        counts = [f"{ZONES[zone_id].name}: {game.zone_counts[zone_id]}" for zone_id in adjacent]
-        player.last_result = "Nearby population: " + ", ".join(counts) + "."
-        event = game.add_event(f"{player.name} scouted the area.", "PLAYER_SCOUTED", player_ids=(player.id,))
     elif action == "ATTACK":
         target = game.players.get(target_player_id or "")
         if not target or not target.alive:
@@ -1547,12 +1984,14 @@ def _apply_player_action_locked(
         player.battle_action = None
         player.current_action = "BATTLE"
         player.action_taken = True
+        player.round_action_complete = False
         player.action_deadline = battle.deadline
         target.battle_id = battle.id
         target.battle_opponent_id = player.id
         target.battle_action = None
         target.current_action = "BATTLE"
         target.action_taken = True
+        target.round_action_complete = False
         target.action_deadline = battle.deadline
         player.last_result = f"You engaged {target.name}. Choose ATTACK, DEFEND, or RUN."
         target.last_result = f"{player.name} attacked you and you are now engaged. Choose ATTACK, DEFEND, or RUN."
@@ -1700,11 +2139,17 @@ async def join_game(request: JoinRequest) -> dict[str, Any]:
         if duplicate:
             raise HTTPException(status_code=409, detail="That name is already registered")
 
+        district = next_district_for_gender_locked(request.gender)
+        if district is None:
+            raise HTTPException(status_code=409, detail=f"All 12 {request.gender} district slots are already filled.")
+
         levels = resolve_stat_choice(request.stats)
         rolled = {stat: roll_stat(level) for stat, level in levels.items()}
         player = Player(
             id=next_player_id(),
             name=name,
+            gender=request.gender,
+            district=district,
             attack=rolled["attack"],
             defense=rolled["defense"],
             agility=rolled["agility"],
@@ -1759,6 +2204,8 @@ async def player_action(
             request.targetPlayerId,
             request.itemId,
         )
+        if _all_round_actions_complete_locked():
+            _resolve_round_locked(eliminate_missed=False)
         snapshot = player_state(player)
         _write_checkpoint_locked()
 
@@ -1846,24 +2293,34 @@ async def admin_action(
                 raise HTTPException(status_code=400, detail="Player supplies can only be placed at the Cornucopia.")
             game.zone_items["cornucopia"].append(make_item(random_loot_type()))
             selected_event = game.add_event("The admin dropped supplies at the Cornucopia.", "SUPPLY_DROP")
-        elif action == "TRIGGER_HAZARD":
+        elif action in {"TRIGGER_HAZARD", "TOGGLE_HAZARD"}:
             if game.status not in {GameStatus.ACTIVE, GameStatus.PAUSED}:
-                raise HTTPException(status_code=409, detail="Hazards can only be triggered during the game")
+                raise HTTPException(status_code=409, detail="Hazards can only be changed during the game")
             target = request.targetZoneId
-            if target is not None and target not in OUTER_ZONE_IDS:
-                raise HTTPException(status_code=400, detail="Hazards can only target outer zones")
-            if target:
-                game.hazard_zones = {target}
+            if not target or target not in OUTER_ZONE_IDS:
+                raise HTTPException(status_code=400, detail="Choose one of the six outer zones")
+            if action == "TRIGGER_HAZARD" or target not in game.hazard_zones:
+                game.hazard_zones.add(target)
+                if target == "zone_5":
+                    game.hazard_counters["zone_5"] = 0
+                selected_event = game.add_event(
+                    f"Admin activated {ZONES[target].hazard_name} in {ZONES[target].name}.",
+                    "ARENA_HAZARD",
+                    broadcast=True,
+                )
             else:
-                game.hazard_zones = {rng.choice(list(OUTER_ZONE_IDS))}
-            names = ", ".join(ZONES[zone_id].name for zone_id in game.hazard_zones)
-            selected_event = game.add_event(
-                f"Admin activated an arena hazard in {names}. Players there will take {HAZARD_DAMAGE} damage at round end.",
-                "ARENA_HAZARD",
-            )
+                game.hazard_zones.remove(target)
+                if target == "zone_5":
+                    game.hazard_counters["zone_5"] = 0
+                selected_event = game.add_event(
+                    f"Admin deactivated {ZONES[target].hazard_name} in {ZONES[target].name}.",
+                    "ARENA_HAZARD_CLEARED",
+                    broadcast=True,
+                )
         elif action == "CLEAR_HAZARDS":
             game.hazard_zones.clear()
-            selected_event = game.add_event("The admin cleared all active arena hazards.", "ARENA_HAZARD_CLEARED")
+            game.hazard_counters = {zone_id: 0 for zone_id in OUTER_ZONE_IDS}
+            selected_event = game.add_event("The admin cleared all active arena hazards.", "ARENA_HAZARD_CLEARED", broadcast=True)
         elif action == "BROADCAST_ANNOUNCEMENT":
             message = " ".join((request.message or "").strip().split())
             if not message:
@@ -1952,8 +2409,11 @@ async def admin_action(
                     raise HTTPException(status_code=400, detail="Choose a valid item type")
                 if len(target.inventory) >= MAX_INVENTORY:
                     raise HTTPException(status_code=409, detail="That player's inventory is full")
+                if item_type == "CROWN_OF_BLOOD" and target.zone_id != "cornucopia":
+                    raise HTTPException(status_code=409, detail="Crown Of Blood can only be equipped at the Cornucopia.")
                 item = make_item(item_type)
                 target.inventory.append(item)
+                refresh_item_derived_state_locked(target)
                 target.last_result = f"An admin gave you a {item.name}."
                 selected_event = game.add_event(f"Admin gave {target.name} ({target.id}) a {item.name}.", "ITEM_GRANTED", player_ids=(target.id,))
         elif action == "RESET_GAME":
@@ -1970,6 +2430,7 @@ async def admin_action(
             for items in game.zone_items.values():
                 items.clear()
             game.hazard_zones.clear()
+            game.hazard_counters = {zone_id: 0 for zone_id in OUTER_ZONE_IDS}
             game.add_event("The arena has been reset. Waiting for players.", "GAME_RESET")
         else:
             raise HTTPException(status_code=400, detail="Unsupported admin action")

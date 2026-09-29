@@ -15,17 +15,20 @@ async function parseResponse(response: Response) {
 
 export type StatLevel = 'HIGH' | 'MID' | 'LOW'
 export type StatChoice = { attack: StatLevel; defense: StatLevel; agility: StatLevel }
+export type Gender = 'M' | 'F'
 
-export async function joinGame(name: string, stats: StatChoice) {
+export async function joinGame(name: string, stats: StatChoice, gender: Gender) {
   const response = await fetch(`${API_BASE}/api/join`, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ name, stats }),
+    body: JSON.stringify({ name, stats, gender }),
   })
   return parseResponse(response) as Promise<{
     player: {
       id: string
       name: string
+      gender: Gender
+      district: number
       health: number
       maxHealth: number
       attack: number
@@ -35,7 +38,7 @@ export async function joinGame(name: string, stats: StatChoice) {
       zoneName: string
       alive: boolean
       connected: boolean
-      inventory: { id: string; type: string; name: string; description: string }[]
+      inventory: { id: string; type: string; name: string; description: string; usesRemaining?: number }[]
     }
     sessionToken: string
     game: { gameId: string; status: string; phase: string; round: number; playerCount: number; maxPlayers: number }

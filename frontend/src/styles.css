@@ -330,6 +330,10 @@ select:focus { border-color: #827d72; }
 .stat-pick-btn.selected { background: #dfd8ca; color: #0b0c0e; border-color: #dfd8ca; }
 .stat-pick-btn.selected small { color: #4c4944; }
 .stat-picker-actions { display: grid !important; grid-template-columns: 1fr 2fr; gap: 8px; }
+.gender-picker { border: 1px solid #2b2e33; background: #0f1013; padding: 12px; display: grid; gap: 10px; }
+.gender-options { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
+.gender-btn { min-height: 44px; border: 1px solid #3a3d42; background: #15171a; color: #ddd8cc; font-weight: 800; letter-spacing: .08em; }
+.gender-btn.selected { background: #dfd8ca; color: #0b0c0e; border-color: #dfd8ca; }
 
 /* ------------------------------------------------------------------ */
 /* Player game screen: one phone screen, no tabs, no page scroll        */
@@ -364,7 +368,7 @@ select:focus { border-color: #827d72; }
 .hp-value small { color: #77736c; font-size: .7rem; font-weight: 600; }
 
 .pg-status { margin: 0; color: #b8b3aa; font-size: .76rem; line-height: 1.3; height: 2.6em; display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden; }
-.pg-alert { border: 1px solid #67562f; background: #17150f; color: #e7d5a3; padding: 5px 9px; font-size: .64rem; font-weight: 800; letter-spacing: .07em; }
+.pg-alert { border: 1px solid #67562f; background: #17150f; color: #e7d5a3; padding: 5px 9px; font-size: .62rem; font-weight: 800; letter-spacing: .05em; line-height: 1.25; }
 .pg-alert.conn { border-color: #63403b; background: #211312; color: #e0c4be; }
 .pg-error { background: #2b1515; border: 1px solid #673a36; color: #ffd8d0; padding: 6px 9px; font-size: .72rem; }
 
@@ -383,7 +387,7 @@ select:focus { border-color: #827d72; }
 .pg-btn.grab { border-color: #6a5935; background: #19150d; }
 .pg-btn small { font-size: .6rem; letter-spacing: 0; font-weight: 600; color: #89827a; }
 
-.pg-actions { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; }
+.pg-actions { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; }
 .pg-box { border: 1px solid #2b2e33; background: #101114; padding: 6px 10px; display: flex; align-items: center; justify-content: space-between; gap: 8px; min-height: 52px; min-width: 0; }
 .pg-box.foes { display: grid; align-content: center; justify-content: stretch; gap: 4px; }
 .pg-box.foes.alone { display: flex; align-items: center; justify-content: space-between; min-height: 40px; }
@@ -426,6 +430,15 @@ select:focus { border-color: #827d72; }
 
 @media (max-height: 700px) {
   .pg { gap: 5px; }
+  .pg-zone strong { font-size: 1.15rem; }
+  .pg-btn { min-height: 38px; }
+  .pg-btn.small { min-height: 34px; }
+  .pg-box { min-height: 50px; }
+  .pg-btn.move { min-height: 34px; }
+  .pg-move-grid.many .pg-btn.move { min-height: 28px; }
+  .pg-btn.battle { min-height: 64px; }
+  .pg-status { height: auto; -webkit-line-clamp: 1; }
+}
 
 @media (max-height: 540px) {
   .pg { gap: 4px; padding-top: calc(5px + env(safe-area-inset-top, 0px)); }
@@ -443,15 +456,21 @@ select:focus { border-color: #827d72; }
   .pg-box.foes:not(.alone) { min-height: 0; }
   .pg-move { gap: 3px; }
 }
-  .pg-zone strong { font-size: 1.15rem; }
-  .pg-btn { min-height: 38px; }
-  .pg-btn.small { min-height: 34px; }
-  .pg-box { min-height: 50px; }
-  .pg-btn.move { min-height: 34px; }
-  .pg-move-grid.many .pg-btn.move { min-height: 28px; }
-  .pg-btn.battle { min-height: 64px; }
-  .pg-status { height: auto; -webkit-line-clamp: 1; }
+
+.hit-shake { animation: pg-hit-shake .48s cubic-bezier(.36,.07,.19,.97); }
+@keyframes pg-hit-shake {
+  0%, 100% { transform: translate3d(0, 0, 0); }
+  12% { transform: translate3d(-7px, 1px, 0) rotate(-.3deg); }
+  24% { transform: translate3d(7px, -1px, 0) rotate(.3deg); }
+  36% { transform: translate3d(-5px, 1px, 0); }
+  48% { transform: translate3d(5px, -1px, 0); }
+  60% { transform: translate3d(-3px, 0, 0); }
+  72% { transform: translate3d(3px, 0, 0); }
+  84% { transform: translate3d(-1px, 0, 0); }
 }
+.zone-hazard-name { color: var(--hg-gold-hi, #e7d5a3); font-size: .68rem; font-weight: 800; letter-spacing: .05em; text-transform: uppercase; }
+.zone-card .button-small { margin-top: 4px; width: 100%; }
+@media (prefers-reduced-motion: reduce) { .hit-shake { animation: none; } }
 
 /* ================================================================== */
 /* THE HUNGER GAMES THEME  (everything except /admin)                  */
@@ -598,3 +617,6 @@ html:has(.hg) { background: #080605; } /* themed pages only; admin keeps the ori
 .hg .hazard-flag { color: #ffb3a0; border-color: var(--hg-ember); }
 .hg .zone-card small, .hg .zone-flags { color: var(--hg-muted); }
 .hg .status-pill, .hg .tag { border-color: var(--hg-gold-lo); color: var(--hg-gold-hi); }
+
+.pg-battle-actions.has-item { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+@media (max-width: 700px) { .pg-battle-actions.has-item { grid-template-columns: repeat(2, minmax(0, 1fr)); } }

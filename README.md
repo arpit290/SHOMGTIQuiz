@@ -1,6 +1,6 @@
 # The Arena — Phase 4
 
-A college-event prototype for a **single shared, text-first multiplayer arena game** designed for roughly **200 participants in one match**.
+A college-event prototype for a **single shared, text-first multiplayer arena game** designed for exactly **24 participants in one match**.
 
 Phase 4 focuses on making the existing game practical to operate live: stronger admin tooling, real-time connection status, player-state corrections, event announcements, and a lightweight restart checkpoint.
 
@@ -16,17 +16,17 @@ Phase 4 focuses on making the existing game practical to operate live: stronger 
 
 ### Existing game systems
 - One shared game: `main_game`
-- 200-player cap
-- 13 zones: 12 outer zones + central Cornucopia
+- 24-player cap
+- 7 zones: 6 hazard zones + central Cornucopia
 - Global timed rounds (15 seconds by default)
 - Backend-authoritative deadlines
 - One action per player per round
 - Cornucopia-only item pickup with a dedicated GRAB ITEM action
 - Timeout and late-submission elimination
 - Opening / Main / Final / Game Over phases
-- MOVE, REST, SCOUT, ATTACK, USE_ITEM, WAIT, and Cornucopia-only GRAB ITEM
-- Engaged two-player battles with ATTACK / DEFEND / RUN turns
-- Combat, inventory, loot, supply drops, and arena hazards
+- MOVE, REST, ATTACK, USE_ITEM, WAIT, and Cornucopia-only GRAB ITEM (SCOUT is removed)
+- Engaged two-player battles with ATTACK / DEFEND / RUN turns; each completed combat turn counts toward the round and can auto-advance the round
+- Combat, inventory, loot, supply drops, and six admin-controlled arena hazards
 
 ### Admin dashboard improvements
 - Live `ONLINE`, `ACTED`, and `WAITING` counts
@@ -125,14 +125,12 @@ The frontend derives the backend/WebSocket host from the browser hostname unless
 Defaults:
 
 ```text
-MAX_PLAYERS=200
+MAX_PLAYERS=24
 ADMIN_TOKEN=change-me
 ROUND_DURATION_SECONDS=15
 BATTLE_TURN_DURATION_SECONDS=15
 FINAL_PLAYER_THRESHOLD=20
 SUPPLY_DROP_INTERVAL=3
-HAZARD_INTERVAL=4
-HAZARD_DAMAGE=8
 MAX_INVENTORY=1
 ARENA_STATE_FILE=arena_state.json
 ```
@@ -144,7 +142,7 @@ ARENA_STATE_FILE=arena_state.json
 - Do not use auto-reload during the event.
 - Keep the admin dashboard open on the organizer machine.
 - Test the game from several phones before the event.
-- Do a 200-client simulation or staged load test before the actual match.
+- Do a 24-client simulation or staged load test before the actual match.
 - If the backend restarts, open the admin dashboard, review the recovered `PAUSED` state, and explicitly resume it.
 
 ## Notes
@@ -153,9 +151,9 @@ The project intentionally remains an event-scale prototype rather than a product
 
 ## Player stats, phone UI and personal feed (latest changes)
 
-- **Stat selection:** after entering a name, players assign one **HIGH**, one **MID** and one **LOW** across **Attack**, **Defense** and **Agility**. MID is the baseline (10), HIGH/LOW are +/-40%, and each stat gets a small random multiplier (+/-4%, `STAT_JITTER`) so builds are never identical. `POST /api/join` accepts `stats: {attack, defense, agility}`; if omitted the server assigns a random valid split.
-- **Attack** scales damage dealt. **Defense** passively scales damage taken (0.6x at +40%, 1.4x at -40%). **Agility** drives RUN escape chance and scales arena-hazard damage the same way defense scales hits. It replaces the old `speed` stat (the admin `speed` field is still accepted as an alias for `agility`; the Speed Boost item now grants +3 Agility).
-- **Player screen** is a single phone-sized screen: only HP is shown, with ACT / MOVE / BAG / FEED tabs.
+- **Registration:** the arena accepts at most **24 players**. During registration, each tribute chooses **M** or **F** alongside their one-HIGH / one-MID / one-LOW stat split. District assignment is server-side: the first male gets District 1, the next male District 2, and so on through District 12; females fill the matching District 1–12 slots independently.
+- **Attack** scales damage dealt. **Defense** passively scales damage taken (0.6x at +40%, 1.4x at -40%). **Agility** drives RUN escape chance and scales arena-hazard damage. It replaces the old `speed` stat (the admin `speed` field is still accepted as an alias for agility).
+- **Player screen** is a single phone-sized screen with no scrolling; the action controls, inventory, movement, target picker and personal feed stay on the same view.
 - **Live feed** only contains events the player did, that happened to them, or arena-wide notices (announcements, game start/pause/resume/over). Opponents' simultaneous battle choices are never leaked.
 
 ## One-item bag, phone screen and Hunger Games theme (latest changes)
@@ -164,3 +162,33 @@ The project intentionally remains an event-scale prototype rather than a product
 - **No tabs.** The player screen is a single phone-sized layout: zone + round + timer, an HP bar, your last result, the action buttons, an item box, a target picker, the Cornucopia offer (when there), every adjacent zone as a move button, and a live feed in the bottom third. It was checked in Chromium at 320x480 through 430x900 with no overflow or page scroll.
 - **Theme.** Everything except `/admin` is styled in a Hunger Games palette (charred black, Capitol gold, flame orange, ember red, arena green) via a `.hg` class that `Shell` puts on the page for non-admin routes. Admin styling is unchanged. Headings use a Trajan/Cinzel-style serif with system fallbacks.
 
+
+## Current item pool
+
+The only items in the arena are the following twelve. Players can carry one item at a time; consumables can be used as normal actions or as a battle move, while passive gear is active automatically.
+
+1. **Medkit** — consumable; heals 50% of maximum HP.
+2. **Shiny Sword** — +40% Attack.
+3. **Golden Apple** — consumable; +50% Attack, Defense and Agility for 5 turns.
+4. **Shadow Cloak** — 35% higher dodge chance.
+5. **Titan Shield** — 40% less damage in a fight; breaks after 7 uses.
+6. **Hunter's Feather** — +50% Agility; +50% damage taken in fights.
+7. **Phoenix Ashes** — revives at 35% max HP on death, then is destroyed.
+8. **Heart of Iron** — +60% max HP; -50% Agility.
+9. **Serpentine Dagger** — 0.75x Attack; successful hits apply the Poisoned effect used by the Poison Fog.
+10. **Berserker Gauntlets** — +30% Attack below 50% HP; +75% Attack below 15% HP.
+11. **Adventurer's Boots** — move up to two ring areas left/right; 40% less environmental damage.
+12. **Crown Of Blood** — each kill while wearing it adds 30% to all stats; it can only be equipped and moved while at the Cornucopia.
+
+## Current arena hazards and round rules
+
+The six outer zones are fixed to these hazards; the admin can activate or deactivate each one during the match:
+
+1. **Lightning Strikes** — every turn you begin here, there is a chance to be hit; Agility affects the outcome and damage.
+2. **Tracker Jacker Wasps** — at turn start there is a chance to be stung for 30% damage; Agility affects the outcome and damage.
+3. **Blood Rain** — applies FEAR, reducing Attack, Defense and Agility by 30% for five turns.
+4. **Poison Fog** — escalates through 7%, 15% and 25% poison damage stages, with the specified warning messages and two-turn poison duration per stage.
+5. **Tidal Wave** — a shared three-turn counter gives the vibration warning, distant-wave warning, then a 50% wave hit reduced by Agility before resetting.
+6. **Monkey Mutations** — Monkey Mutts attack each turn for a random 5–20% of max HP, reduced by Agility.
+
+A round now advances immediately when every living participant has completed their action. This also applies to battle turns: both combatants must resolve their current combat choice, after which a still-active battle carries into the next round. When the round timer expires instead, unresolved battle choices auto-defend and players who failed to act are eliminated as before.

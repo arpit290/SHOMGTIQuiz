@@ -6,6 +6,7 @@ export type InventoryItem = {
   type: string
   name: string
   description: string
+  usesRemaining?: number
 }
 
 export type VisibleOpponent = {
@@ -21,6 +22,8 @@ export type Zone = {
   name: string
   description: string
   connectedZones: string[]
+  hazardName?: string | null
+  hazardDescription?: string | null
   playerCount?: number
   lootCount?: number
   hazard?: boolean
@@ -29,6 +32,8 @@ export type Zone = {
 export type Player = {
   id: string
   name: string
+  gender: 'M' | 'F'
+  district: number
   health: number
   maxHealth: number
   attack: number
@@ -86,6 +91,8 @@ export type PlayerGameState = {
   zoneLootCount: number
   offeredItem: InventoryItem | null
   zoneHazard: boolean
+  hazardName: string | null
+  hazardDescription: string | null
   hazardDamage: number
   playerCount: number
   aliveCount: number
