@@ -2204,13 +2204,23 @@ async def player_action(
             request.targetPlayerId,
             request.itemId,
         )
+        round_before = game.round_number
         if _all_round_actions_complete_locked():
             _resolve_round_locked(eliminate_missed=False)
+        round_changed = game.round_number != round_before
         snapshot = player_state(player)
         _write_checkpoint_locked()
 
-    await sync_action_result(player.id, event)
-    await sync_player_ids(related_player_ids - {player.id})
+    # When the last player acts, the server may advance the round immediately.
+    # A normal action sync only updates the actor (plus directly related players),
+    # which can leave other clients — especially mobile clients — displaying the
+    # old round/deadline until they refresh. Push the complete new state to every
+    # connected player whenever an early round transition occurs.
+    if round_changed:
+        await sync_everyone_full()
+    else:
+        await sync_action_result(player.id, event)
+        await sync_player_ids(related_player_ids - {player.id})
     return snapshot
 
 
