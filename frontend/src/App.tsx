@@ -2,6 +2,7 @@ import { FormEvent, useEffect, useMemo, useRef, useState } from 'react'
 import type { ReactNode } from 'react'
 import { Link, Route, Routes, useLocation, useNavigate } from 'react-router-dom'
 import { adminAction, adminLogin, adminWsUrl, getAdminState, getPlayerState, getSpectateState, joinGame, playerWsUrl, spectateWsUrl, submitAction, type AdminActionOptions, type Gender, type StatChoice, type StatLevel } from './api'
+import { ArenaMap } from './ArenaMap'
 import type { AdminState, Battle, GameEvent, InventoryItem, Player, PlayerGameState, SpectateState, VisibleOpponent, Zone } from './types'
 
 const fmtStat = (value: number) => (Math.round(value * 10) / 10).toString()
@@ -983,10 +984,8 @@ function SpectatePage() {
       </div>
 
       <div className="panel">
-        <div className="section-heading">ARENA MAP</div>
-        <div className="spectate-zone-grid">
-          {state.zones.map((zone) => <ZoneAdminCard key={zone.id} zone={zone} />)}
-        </div>
+        <div className="section-heading">LIVE ARENA MAP</div>
+        <ArenaMap zones={state.zones} players={state.players} />
       </div>
 
       <div className="panel">

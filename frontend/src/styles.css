@@ -620,3 +620,35 @@ html:has(.hg) { background: #080605; } /* themed pages only; admin keeps the ori
 
 .pg-battle-actions.has-item { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 @media (max-width: 700px) { .pg-battle-actions.has-item { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
+
+/* ---- live arena map ---- */
+.arena-map { display: grid; gap: 10px; justify-items: center; }
+.arena-map-svg { width: min(100%, 680px); height: auto; display: block; }
+.arena-wedge-shape { fill: rgba(29,22,17,.85); stroke: none; transition: fill .4s; }
+.arena-wedge.hazard .arena-wedge-shape { fill: rgba(110,15,20,.5); }
+.arena-hub { fill: #241a0d; stroke: none; }
+.arena-hub { fill: rgba(217,165,32,.14); }
+.arena-rim, .arena-spoke { fill: none; stroke: #d9a520; stroke-width: 3; stroke-linecap: round; }
+.arena-hub-ring { fill: none; }
+.arena-spoke { stroke: rgba(217,165,32,.75); }
+.arena-zone-name { fill: #f6d774; font: 700 13px Georgia, serif; letter-spacing: .16em; }
+.arena-zone-hazard { fill: #a8977a; font: 600 9.5px sans-serif; letter-spacing: .06em; }
+.arena-zone-count { fill: #ff9c8a; font: 700 9px sans-serif; letter-spacing: .08em; }
+.arena-hub-label { fill: #d9a520; font: 700 9px Georgia, serif; letter-spacing: .2em; }
+.arena-hub-empty { fill: #a8977a; font: 600 11px sans-serif; }
+.arena-token { cursor: pointer; transition: transform .7s cubic-bezier(.4,.1,.2,1); }
+.arena-token-disc { fill: #e8d9a8; stroke: #0b0806; stroke-width: 2; }
+.arena-token.f .arena-token-disc { fill: #e9b8c2; }
+.arena-token-num { fill: #1a120b; font-family: sans-serif; font-weight: 800; pointer-events: none; }
+.arena-token.battle .arena-token-disc { fill: #e5424a; stroke: #ffd1c7; animation: arenaPulse 1s ease-in-out infinite; }
+.arena-token.battle .arena-token-num { fill: #fff; }
+.arena-token.selected .arena-token-disc { stroke: #fff; stroke-width: 3; }
+@keyframes arenaPulse { 50% { stroke-width: 4; stroke: #ff6a1a; } }
+.arena-map-caption { font-size: .78rem; min-height: 1.2em; text-align: center; }
+.arena-legend { display: flex; flex-wrap: wrap; justify-content: center; gap: 6px 16px; font-size: .68rem; color: #a8977a; }
+.arena-legend .dot { display: inline-block; width: 10px; height: 10px; border-radius: 50%; margin-right: 5px; vertical-align: -1px; }
+.arena-legend .dot.m { background: #e8d9a8; }
+.arena-legend .dot.f { background: #e9b8c2; }
+.arena-legend .dot.b { background: #e5424a; }
+.arena-legend .dot.h { background: rgba(110,15,20,.8); border: 1px solid #c81d25; }
+@media (prefers-reduced-motion: reduce) { .arena-token, .arena-token-disc { transition: none; animation: none; } }
