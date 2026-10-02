@@ -26,8 +26,6 @@ ADMIN_TOKEN = os.getenv("ADMIN_TOKEN", "change-me")
 ROUND_DURATION_SECONDS = max(5, int(os.getenv("ROUND_DURATION_SECONDS", "30")))
 BATTLE_TURN_DURATION_SECONDS = max(5, int(os.getenv("BATTLE_TURN_DURATION_SECONDS", "15")))
 FINAL_PLAYER_THRESHOLD = max(2, int(os.getenv("FINAL_PLAYER_THRESHOLD", "20")))
-SUPPLY_DROP_INTERVAL = max(1, int(os.getenv("SUPPLY_DROP_INTERVAL", "3")))
-HAZARD_DAMAGE = 20  # Legacy preview value; fixed hazards below define their real effects.
 MAX_INVENTORY = max(1, int(os.getenv("MAX_INVENTORY", "1")))
 STATE_FILE = Path(os.getenv("ARENA_STATE_FILE", "arena_state.json"))
 
@@ -1189,7 +1187,7 @@ def _spawn_hazards_locked() -> None:
         game.hazard_zones.add(zone_id)
     names = ", ".join(ZONES[zone_id].name for zone_id in game.hazard_zones)
     game.add_event(
-        f"Arena hazard active in {names}. Players there will take {HAZARD_DAMAGE} damage at round end.",
+        f"Arena hazard active in {names}. Players there will take damage at round start.",
         "ARENA_HAZARD",
     )
 
@@ -1482,10 +1480,6 @@ def _apply_hazards_at_round_start_locked() -> list[dict[str, Any]]:
     if tidal_counter == 3:
         game.hazard_counters["zone_5"] = 0
 
-        # If poison is gone and no other temporary effect is active, clear the stale display.
-        if player.poison_turns_remaining <= 0 and player.status_effect == "POISONED":
-            player.status_effect = "NORMAL"
-
     return events
 
 
@@ -1706,7 +1700,7 @@ def _resolve_battle_turn_locked(battle: Battle) -> list[dict[str, Any]]:
         for runner, opponent, runner_action in runners:
             if runner_action != "BATTLE_RUN":
                 continue
-            chance = max(0.20, min(0.85, 0.50 + (runner.agility - opponent.agility) * 0.04))
+            chance = max(0.20, min(0.85, 0.50 + (effective_stat(runner, "agility") - effective_stat(opponent, "agility")) * 0.04))
             success = rng.random() < chance
             if success:
                 runner.last_result = f"You escaped from {opponent.name}."
@@ -2169,10 +2163,12 @@ async def join_game(request: JoinRequest) -> dict[str, Any]:
             "playerCount": len(game.players),
             "maxPlayers": MAX_PLAYERS,
         }
+        admin_snapshot = admin_state()
+        spectator_snapshot = spectate_state()
 
     await asyncio.gather(
-        manager.broadcast_admin({"type": "ADMIN_STATE", "data": admin_state()}),
-        manager.broadcast_spectators({"type": "SPECTATE_STATE", "data": spectate_state()}),
+        manager.broadcast_admin({"type": "ADMIN_STATE", "data": admin_snapshot}),
+        manager.broadcast_spectators({"type": "SPECTATE_STATE", "data": spectator_snapshot}),
     )
 
     return {
@@ -2489,12 +2485,14 @@ async def player_ws(websocket: WebSocket, player_id: str, token: str | None = No
     except WebSocketDisconnect:
         last_connection = manager.disconnect_player(player_id, websocket)
         if last_connection:
+            admin_snapshot = None
+            spectator_snapshot = None
             async with state_lock:
                 if player_id in game.players:
                     game.players[player_id].connected = False
                     _write_checkpoint_locked()
-                    admin_snapshot = admin_state()
-                    spectator_snapshot = spectate_state()
+                admin_snapshot = admin_state()
+                spectator_snapshot = spectate_state()
             await manager.broadcast_admin({"type": "ADMIN_STATE", "data": admin_snapshot})
             await manager.broadcast_spectators({"type": "SPECTATE_STATE", "data": spectator_snapshot})
 

@@ -622,20 +622,19 @@ html:has(.hg) { background: #080605; } /* themed pages only; admin keeps the ori
 @media (max-width: 700px) { .pg-battle-actions.has-item { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 
 /* ---- live arena map ---- */
-.arena-map { display: grid; gap: 10px; justify-items: center; }
-.arena-map-svg { width: min(100%, 680px); height: auto; display: block; }
+.arena-map { display: grid; gap: 10px; justify-items: center; margin: 0 auto; text-align: center; }
+.arena-map-svg { width: min(100%, 680px); height: auto; display: block; margin: 0 auto; }
 .arena-wedge-shape { fill: rgba(29,22,17,.85); stroke: none; transition: fill .4s; }
 .arena-wedge.hazard .arena-wedge-shape { fill: rgba(110,15,20,.5); }
-.arena-hub { fill: #241a0d; stroke: none; }
-.arena-hub { fill: rgba(217,165,32,.14); }
+.arena-hub { fill: rgba(217,165,32,.14); stroke: none; }
 .arena-rim, .arena-spoke { fill: none; stroke: #d9a520; stroke-width: 3; stroke-linecap: round; }
 .arena-hub-ring { fill: none; }
 .arena-spoke { stroke: rgba(217,165,32,.75); }
 .arena-zone-name { fill: #f6d774; font: 700 13px Georgia, serif; letter-spacing: .16em; }
 .arena-zone-hazard { fill: #a8977a; font: 600 9.5px sans-serif; letter-spacing: .06em; }
 .arena-zone-count { fill: #ff9c8a; font: 700 9px sans-serif; letter-spacing: .08em; }
-.arena-hub-label { fill: #d9a520; font: 700 9px Georgia, serif; letter-spacing: .2em; }
-.arena-hub-empty { fill: #a8977a; font: 600 11px sans-serif; }
+.arena-hub-label { fill: #d9a520; font: 700 13px Georgia, serif; letter-spacing: .16em; }
+.arena-hub-empty { fill: #a8977a; font: 600 11px sans-serif; letter-spacing: .04em; }
 .arena-token { cursor: pointer; transition: transform .7s cubic-bezier(.4,.1,.2,1); }
 .arena-token-disc { fill: #e8d9a8; stroke: #0b0806; stroke-width: 2; }
 .arena-token.f .arena-token-disc { fill: #e9b8c2; }
@@ -652,3 +651,35 @@ html:has(.hg) { background: #080605; } /* themed pages only; admin keeps the ori
 .arena-legend .dot.b { background: #e5424a; }
 .arena-legend .dot.h { background: rgba(110,15,20,.8); border: 1px solid #c81d25; }
 @media (prefers-reduced-motion: reduce) { .arena-token, .arena-token-disc { transition: none; animation: none; } }
+
+/* ---- arena map + legend layout ---- */
+.arena-map-with-legend { display: flex; gap: 20px; align-items: flex-start; }
+.arena-map-with-legend .arena-map { flex: 1; min-width: 0; }
+.arena-player-legend {
+  flex: 0 0 200px; max-height: 600px; overflow-y: auto;
+  display: flex; flex-direction: column; gap: 4px;
+  padding: 10px 12px; border-radius: 8px;
+  background: rgba(29,22,17,.7); border: 1px solid rgba(217,165,32,.2);
+}
+.arena-player-legend-heading {
+  font: 700 10px sans-serif; letter-spacing: .15em; color: #d9a520;
+  margin-bottom: 6px; padding-bottom: 6px; border-bottom: 1px solid rgba(217,165,32,.15);
+}
+.arena-player-legend-item { display: flex; align-items: center; gap: 8px; padding: 3px 0; }
+.arena-player-legend-item.dead { opacity: .35; }
+.arena-player-legend-dot {
+  display: inline-flex; align-items: center; justify-content: center;
+  width: 22px; height: 22px; border-radius: 50%; flex-shrink: 0;
+  font: 800 10px sans-serif; color: #1a120b;
+  background: #e8d9a8; border: 2px solid #0b0806;
+}
+.arena-player-legend-dot.f { background: #e9b8c2; }
+.arena-player-legend-dot.battle { background: #e5424a; color: #fff; border-color: #ffd1c7; animation: arenaPulse 1s ease-in-out infinite; }
+.arena-player-legend-name { font-size: .78rem; color: #e0d6c8; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.arena-player-legend-item.dead .arena-player-legend-name { text-decoration: line-through; color: #6b6358; }
+@media (max-width: 800px) {
+  .arena-map-with-legend { flex-direction: column; align-items: center; }
+  .arena-player-legend { flex: none; width: 100%; max-height: 300px; flex-direction: row; flex-wrap: wrap; }
+  .arena-player-legend-heading { flex-basis: 100%; }
+  .arena-player-legend-item { flex: 0 0 auto; }
+}

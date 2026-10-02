@@ -985,7 +985,23 @@ function SpectatePage() {
 
       <div className="panel">
         <div className="section-heading">LIVE ARENA MAP</div>
-        <ArenaMap zones={state.zones} players={state.players} />
+        <div className="arena-map-with-legend">
+          <ArenaMap zones={state.zones} players={state.players} />
+          <div className="arena-player-legend">
+            <div className="arena-player-legend-heading">TRIBUTES</div>
+            {state.players
+              .slice()
+              .sort((a, b) => Number(b.alive) - Number(a.alive) || a.district - b.district || a.gender.localeCompare(b.gender))
+              .map((player) => (
+              <div key={player.id} className={`arena-player-legend-item ${!player.alive ? 'dead' : ''} ${player.battle ? 'battle' : ''}`}>
+                <span className={`arena-player-legend-dot ${player.gender === 'F' ? 'f' : 'm'} ${player.battle ? 'battle' : ''}`}>
+                  {player.district}
+                </span>
+                <span className="arena-player-legend-name">{player.name}</span>
+              </div>
+            ))}
+          </div>
+        </div>
       </div>
 
       <div className="panel">

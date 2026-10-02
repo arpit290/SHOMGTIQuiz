@@ -5,6 +5,7 @@ const SIZE = 600
 const C = SIZE / 2
 const R_OUT = 285
 const R_IN = 84
+const R_LABEL = (R_IN + R_OUT) / 2 // radial midpoint of the wedge — labels sit here
 const OUTER_IDS = ['zone_1', 'zone_2', 'zone_3', 'zone_4', 'zone_5', 'zone_6']
 
 // Angles are degrees clockwise from 12 o'clock. Zone N spans [(N-1)*60, N*60].
@@ -28,7 +29,7 @@ function wedgeSlots(index: number, n: number, tr: number): Slot[] | null {
   const step = tr * 2 + gap
   const center = index * 60 + 30
   const rMin = R_IN + tr + 10
-  const rMax = R_OUT - 62 // leave room for the zone label at the outer edge
+  const rMax = R_LABEL - 20 // keep tokens in the inner half, below the centered zone label
   const slots: Slot[] = []
   for (let r = rMin; r <= rMax && slots.length < n; r += step) {
     // available arc: 60deg minus the margin needed so tokens clear the spokes
@@ -122,7 +123,7 @@ export function ArenaMap({ zones, players }: Props) {
       <svg viewBox={`0 0 ${SIZE} ${SIZE}`} className="arena-map-svg" role="img" aria-label="Live arena map">
         {OUTER_IDS.map((id, i) => {
           const zone = zoneById.get(id)
-          const label = pt(R_OUT - 30, i * 60 + 30)
+          const label = pt(R_LABEL, i * 60 + 30)
           const count = placed.filter((t) => t.player.zoneId === id).length
           return (
             <g key={id} className={`arena-wedge ${zone?.hazard ? 'hazard' : ''}`}>
@@ -144,9 +145,9 @@ export function ArenaMap({ zones, players }: Props) {
           const a = pt(R_OUT, i * 60), b = pt(R_IN, i * 60)
           return <line key={id} x1={a.x} y1={a.y} x2={b.x} y2={b.y} className="arena-spoke" />
         })}
-        <text x={C} y={C - R_IN + 17} textAnchor="middle" className="arena-hub-label">CORNUCOPIA</text>
+        <text x={C} y={C - 6} textAnchor="middle" dominantBaseline="central" className="arena-hub-label">CORNUCOPIA</text>
         {aliveInCorn === 0 && (
-          <text x={C} y={C + 6} textAnchor="middle" className="arena-hub-empty">{cornucopia?.lootCount ? `${cornucopia.lootCount} loot` : 'empty'}</text>
+          <text x={C} y={C + 14} textAnchor="middle" dominantBaseline="central" className="arena-hub-empty">{cornucopia?.lootCount ? `${cornucopia.lootCount} loot` : 'empty'}</text>
         )}
 
         {placed.map(({ player, x, y, tr }) => {
